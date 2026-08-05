@@ -1,0 +1,239 @@
+from __future__ import annotations
+
+import logging
+import os
+import shutil
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+from tqdm.auto import tqdm
+
+from .psa_classifier import PSA
+
+logger = logging.getLogger(__name__)
+
+PSA_MAX_WORKERS = 8
+_WORKER_PSA = None
+
+
+def add_sequence_match_columns(df: pd.DataFrame) -> None:
+    """Add unmodified/modified sequence and precursor-charge match columns, in place."""
+    sequence_columns = ["SEQUENCE_database", "SEQUENCE_denovo"]
+    if not set(sequence_columns).issubset(df.columns):
+        df["unmodified_sequence_match"] = False
+        df["modified_sequence_match"] = False
+        df["precursor_charge_match"] = False
+        df["sequence_match"] = False
+        return
+
+    df["unmodified_sequence_match"] = (
+        df["SEQUENCE_database"].notna() & df["SEQUENCE_denovo"].notna() & df["SEQUENCE_database"].eq(df["SEQUENCE_denovo"])
+    )
+
+    modified_columns = ["MODIFIED_SEQUENCE_database", "MODIFIED_SEQUENCE_denovo"]
+    if set(modified_columns).issubset(df.columns):
+        df["modified_sequence_match"] = (
+            df["MODIFIED_SEQUENCE_database"].notna()
+            & df["MODIFIED_SEQUENCE_denovo"].notna()
+            & df["MODIFIED_SEQUENCE_database"].eq(df["MODIFIED_SEQUENCE_denovo"])
+        )
+    else:
+        df["modified_sequence_match"] = False
+
+    charge_columns = ["PRECURSOR_CHARGE_database", "PRECURSOR_CHARGE_denovo"]
+    if set(charge_columns).issubset(df.columns):
+        database_charge = pd.to_numeric(df["PRECURSOR_CHARGE_database"], errors="coerce")
+        denovo_charge = pd.to_numeric(df["PRECURSOR_CHARGE_denovo"], errors="coerce")
+        df["precursor_charge_match"] = database_charge.notna() & denovo_charge.notna() & database_charge.eq(denovo_charge)
+    else:
+        df["precursor_charge_match"] = False
+
+    df["sequence_match"] = df["modified_sequence_match"] & df["precursor_charge_match"]
+
+
+def _merge_label_mapping() -> dict[str, str]:
+    return {"right_only": "denovo_only", "left_only": "database_only", "both": "shared"}
+
+
+def _coalesce_merged_column(merged: pd.DataFrame, column: str) -> None:
+    left_column = f"{column}_database"
+    right_column = f"{column}_denovo"
+    if left_column not in merged.columns and right_column not in merged.columns:
+        return
+    left_values = merged[left_column] if left_column in merged.columns else pd.Series(index=merged.index, dtype="object")
+    right_values = merged[right_column] if right_column in merged.columns else pd.Series(index=merged.index, dtype="object")
+    merged[column] = left_values.combine_first(right_values)
+
+
+def _chimeric_scan_keys(merged_database: pd.DataFrame) -> set[tuple[str, int]]:
+    required = ["RAW_FILE", "SCAN_NUMBER", "SEQUENCE"]
+    missing = [column for column in required if column not in merged_database.columns]
+    if missing or merged_database.empty:
+        return set()
+
+    database = merged_database.dropna(subset=required).copy()
+    if database.empty:
+        return set()
+
+    database["SCAN_NUMBER"] = pd.to_numeric(database["SCAN_NUMBER"], errors="coerce")
+    database = database.dropna(subset=["SCAN_NUMBER"])
+    if database.empty:
+        return set()
+
+    counts = database.groupby(["RAW_FILE", "SCAN_NUMBER"], observed=True)["SEQUENCE"].nunique()
+    chimeric = counts[counts > 1]
+    return {(str(raw_file), int(scan_number)) for raw_file, scan_number in chimeric.index}
+
+
+def _add_chimeric_column(merged: pd.DataFrame, chimeric_scan_keys: set[tuple[str, int]]) -> None:
+    if not {"RAW_FILE", "SCAN_NUMBER"}.issubset(merged.columns) or not chimeric_scan_keys:
+        merged["chimeric"] = False
+        return
+
+    scan_number = pd.to_numeric(merged["SCAN_NUMBER"], errors="coerce")
+    keys = pd.Series(zip(merged["RAW_FILE"].astype(str), scan_number), index=merged.index, dtype="object")
+    merged["chimeric"] = keys.map(lambda key: pd.notna(key[1]) and (key[0], int(key[1])) in chimeric_scan_keys)
+
+
+def _merge_search_results(merged_database: pd.DataFrame, merged_denovo: pd.DataFrame) -> pd.DataFrame:
+    merged = merged_database.merge(
+        merged_denovo,
+        how="outer",
+        on=["RAW_FILE", "SCAN_NUMBER"],
+        indicator=True,
+        suffixes=("_database", "_denovo"),
+    )
+
+    for column in ("SpecId", "RAW_FILE", "SCAN_NUMBER"):
+        _coalesce_merged_column(merged, column)
+
+    _add_chimeric_column(merged, _chimeric_scan_keys(merged_database))
+    add_sequence_match_columns(merged)
+
+    merged["_merge"] = merged["_merge"].map(_merge_label_mapping())
+    return merged
+
+
+def _init_psa_worker() -> None:
+    global _WORKER_PSA
+    _WORKER_PSA = PSA()
+
+
+def _run_psa_pair(sequence1, sequence2):
+    global _WORKER_PSA
+    if _WORKER_PSA is None:
+        _WORKER_PSA = PSA()
+    try:
+        _WORKER_PSA.set_sequences(str(sequence1), str(sequence2))
+        _WORKER_PSA.classify()
+    except Exception as exc:
+        return ("PSA_ERROR", np.nan, f"{type(exc).__name__}: {exc}")
+    return (_WORKER_PSA.result.label, _WORKER_PSA.result.similarity, None)
+
+
+def _choose_chunksize(total_items: int, n_workers: int) -> int:
+    if total_items <= 0:
+        return 1
+    return max(1, total_items // max(1, n_workers * 8))
+
+
+def _run_psa_for_pairs(sequences_database: pd.Series, sequences_denovo: pd.Series) -> pd.DataFrame:
+    n_workers = PSA_MAX_WORKERS
+    chunksize = _choose_chunksize(len(sequences_database), n_workers)
+    with ProcessPoolExecutor(max_workers=n_workers, initializer=_init_psa_worker) as executor:
+        rows = list(
+            tqdm(
+                executor.map(_run_psa_pair, sequences_database.tolist(), sequences_denovo.tolist(), chunksize=chunksize),
+                total=len(sequences_database),
+                desc="Running PSA",
+            )
+        )
+    return pd.DataFrame(rows, columns=["PSA", "PSA_SIMILARITY", "PSA_ERROR"], index=sequences_database.index)
+
+
+def _add_psa_columns(merged_scan: pd.DataFrame) -> None:
+    """Classify PSA on shared, sequence-differing scans; add PSA columns to every row.
+
+    Rows outside "shared" (database_only/denovo_only), or shared rows missing a
+    sequence on either side, get null PSA columns -- PSA only applies where both a
+    database and a de novo call exist for the same scan.
+    """
+    required = ["_merge", "SEQUENCE_database", "SEQUENCE_denovo"]
+    missing = [column for column in required if column not in merged_scan.columns]
+    if missing:
+        raise KeyError(f"Missing columns needed for PSA: {missing}")
+
+    merged_scan["PSA"] = None
+    merged_scan["PSA_SIMILARITY"] = np.nan
+    merged_scan["PSA_ERROR"] = None
+
+    shared_mask = (
+        merged_scan["_merge"].eq("shared") & merged_scan["SEQUENCE_database"].notna() & merged_scan["SEQUENCE_denovo"].notna()
+    )
+    same_sequence_mask = shared_mask & merged_scan["sequence_match"]
+    different_sequence_mask = shared_mask & ~merged_scan["sequence_match"]
+
+    merged_scan.loc[same_sequence_mask, "PSA"] = "PSA - Tier 0 - IDENTICAL"
+    merged_scan.loc[same_sequence_mask, "PSA_SIMILARITY"] = 1.0
+
+    if different_sequence_mask.any():
+        scored = _run_psa_for_pairs(
+            merged_scan.loc[different_sequence_mask, "SEQUENCE_database"],
+            merged_scan.loc[different_sequence_mask, "SEQUENCE_denovo"],
+        )
+        merged_scan.loc[different_sequence_mask, "PSA"] = scored["PSA"]
+        merged_scan.loc[different_sequence_mask, "PSA_SIMILARITY"] = scored["PSA_SIMILARITY"]
+        merged_scan.loc[different_sequence_mask, "PSA_ERROR"] = scored["PSA_ERROR"]
+
+
+def _read_parquet_or_empty(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame(columns=["SpecId", "RAW_FILE", "SCAN_NUMBER"])
+    return pd.read_parquet(path)
+
+
+def run(
+    database_merged_dir: Path,
+    denovo_merged_dir: Path,
+    grove_forest_dir: Path,
+    *,
+    max_raw_files: Optional[int] = None,
+    max_workers: Optional[int] = None,
+    overwrite_outputs: bool = False,
+) -> Path:
+    """Merge every raw file's database+de novo data, run PSA, write grove_forest/<raw>.parquet.
+
+    Deletes ``database_merged_dir``/``denovo_merged_dir`` once done -- their data now
+    lives in ``grove_forest_dir``.
+    """
+    global PSA_MAX_WORKERS
+    PSA_MAX_WORKERS = max_workers or os.cpu_count() or 1
+    grove_forest_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_files = sorted(
+        {path.stem for path in database_merged_dir.glob("*.parquet")}
+        | {path.stem for path in denovo_merged_dir.glob("*.parquet")}
+    )
+    if max_raw_files is not None:
+        raw_files = raw_files[:max_raw_files]
+
+    for raw_file in tqdm(raw_files, desc="Merging + PSA"):
+        out_path = grove_forest_dir / f"{raw_file}.parquet"
+        if out_path.exists() and not overwrite_outputs:
+            continue
+        try:
+            merged_database = _read_parquet_or_empty(database_merged_dir / f"{raw_file}.parquet")
+            merged_denovo = _read_parquet_or_empty(denovo_merged_dir / f"{raw_file}.parquet")
+            merged_scan = _merge_search_results(merged_database, merged_denovo)
+            _add_psa_columns(merged_scan)
+            merged_scan.to_parquet(out_path, index=False, engine="pyarrow")
+        except Exception:
+            logger.exception("%s: merge/PSA failed; skipping", raw_file)
+            continue
+
+    shutil.rmtree(database_merged_dir, ignore_errors=True)
+    shutil.rmtree(denovo_merged_dir, ignore_errors=True)
+    return grove_forest_dir

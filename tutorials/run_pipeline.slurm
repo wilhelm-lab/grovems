@@ -15,6 +15,17 @@ set -euo pipefail
 # request, not just a small driver job. Size cpus/mem/time to your data volume, and
 # match num_threads/psa_max_workers/percolator_threads in your config YAML to
 # --cpus-per-task.
+#
+# No resume: each stage deletes its own big intermediate files (rescore.tab,
+# Percolator's output, the per-branch merged/ dirs) once their data has been folded
+# into the next stage's per-raw-file output, so a failed/preempted run can't pick back
+# up mid-stage -- re-running redoes that stage from scratch. Final output lives in
+# ${OUTDIR}/rescoring/grove_forest/ (one Parquet file per raw file, model under
+# grove_forest/model/). If only IForest needs (re-)running against an already-built
+# grove_forest/, skip straight to it:
+#   grovems run --config "${CONFIG}" \
+#     --set run_rescoring=false --set run_psa=false \
+#     --set grove_forest_dir="${OUTDIR}/rescoring/grove_forest"
 
 #=== Configuration -- edit these for your run ===#
 PIPELINE_DIR="/cmnfs/proj/denovo_fdr/tools/grovems"
@@ -25,7 +36,7 @@ DENOVO_SEARCH_PATH="/cmnfs/proj/denovo_fdr/results/proteometools/results/search/
 RAWDATA_PATH="/cmnfs/proj/denovo_fdr/results/proteometools/raw/mzml"
 OUTDIR="/cmnfs/proj/denovo_fdr/results/proteometools/results/run.$(date +%d%m%Y).grovems"
 
-#=== Environment -- edit to match how you installed grovems (see docs/notes/installation.md) ===#
+#=== Environment -- edit to match how you installed grovems (see docs/notes/installation.rst) ===#
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate grovems
 

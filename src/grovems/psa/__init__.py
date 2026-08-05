@@ -1,6 +1,5 @@
-from . import combine_results_psa
-from .combine_results_psa import run_pipeline
-from .eval import ResultLoader
+from . import psa_merge
 from .psa_classifier import PSA, PSAResult
+from .psa_merge import run
 
-__all__ = ["PSA", "PSAResult", "ResultLoader", "combine_results_psa", "run_pipeline"]
+__all__ = ["PSA", "PSAResult", "psa_merge", "run"]

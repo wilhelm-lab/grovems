@@ -7,35 +7,41 @@ similarity assignment) -> isolation-forest (IForest/SUOD) scoring, for the de no
 
 ## What it does
 
-**`rescoring/`** (`rescoring.run()`)
+**`rescoring/`** (`rescoring.run()`) -- once per branch (database, then de novo):
 1. Runs Oktoberfest (Rescoring job type, in-process via `oktoberfest.runner.run_job`) on
    the MSFragger/FragPipe search results, producing predictions, CE calibration, RT
-   model, a Percolator `.tab`/pin input, and `msms/*.rescore` (Oktoberfest's own
-   normalized copy of the search results, used later by the PSA stage).
-2. Drops unwanted columns from `rescore.tab` and trains Percolator on the filtered pin,
-   producing PSMs, decoy PSMs, and learned feature weights.
-3. Runs Oktoberfest on the Casanovo de novo results, reusing the CE-calibration and
-   RT-model fitted in step 1 (same instrument run) instead of refitting them.
-4. Averages the weight bins from step 2, drops the de novo-specific columns, and
-   re-scores the de novo pin **statically** (`--init-weights ... --static`, no
-   retraining) with those averaged weights.
+   model, and a Percolator `.tab`/pin input. The de novo branch reuses the database
+   branch's CE-calibration and RT-model (same instrument run) instead of refitting them.
+2. Filters `rescore.tab` **in place** (drops unwanted columns, overwrites the same
+   file -- no separate filtered copy).
+3. Runs Percolator against that filtered `rescore.tab`. The de novo branch averages the
+   database branch's learned weights first and rescores **statically** (no retraining).
+4. Merges `rescore.tab` + Percolator's PSM output + that branch's own `msms/*.rescore`
+   search results into `<branch>/merged/<raw_file>.parquet`, one file per raw file, then
+   **deletes** `rescore.tab` and the Percolator PSM output -- their data now lives in
+   `merged/`, so keeping both would just be two copies of the same rows.
 
-**`psa/`** (`combine_results_psa.run_pipeline()`)
-5. Merges the database and de novo search+pin+Percolator results per RAW file: on
-   `SpecId` (`merged_PSM`) and on `RAW_FILE`/`SCAN_NUMBER` (`merged_SCAN`), then runs PSA
-   (`psa_classifier.PSA`) on shared scans whose database and de novo sequences disagree,
-   classifying how similar/different they are. Writes `psa_dataframes/`
-   (`merged_database`, `merged_denovo`, `merged_PSM`, `merged_SCAN`, `shared_scan_psa`,
-   plus `row_counts.csv`/`manifest.csv`/`shared_scan_psa_summary.csv`).
+**`psa/`** (`psa_merge.run()`)
+5. For every raw file, outer-merges the database and de novo `merged/` data on
+   `RAW_FILE`/`SCAN_NUMBER` (a plain outer merge already keeps every match when a scan
+   has more than one hit on either side -- nothing is deduplicated), then runs PSA
+   (`psa_classifier.PSA`) on shared scans whose sequences differ, classifying how
+   similar/different they are. Writes `grove_forest/<raw_file>.parquet` -- feature and
+   PSA columns together in one file (PSA columns are null for non-shared rows) -- then
+   deletes the per-branch `merged/` directories the same way step 4 deleted their own
+   sources.
 
-**`iforest/`** (composed directly in `runner.py`, from `iforest.py`'s functions)
-6. Trains a SUOD ensemble of isolation forests on a high-confidence subset of shared
-   (database/de novo-agreeing) PSMs from step 5's `merged_SCAN`, then scores **every**
-   database-only, de novo-only, *and* shared PSM with it -- none are dropped. Writes
-   `iforest_database/`, `iforest_denovo/`, and `iforest_shared/` (each
-   `RAW_FILE`-partitioned) plus a combined `iforest_all/` with all three concatenated.
+**`iforest/`** (`iforest.run()`, composed in `runner.py`)
+6. Two passes over `grove_forest/*.parquet`: pass 1 gathers only the high-confidence
+   shared-PSM training candidates from every file (without holding each file's full data
+   at once) to fit a SUOD ensemble of isolation forests, saved to
+   `grove_forest/model/SUOD_model.pkl`; pass 2 scores **every** row of every file
+   (database-only, de novo-only, *and* shared -- none are dropped) and overwrites that
+   file with `ISO_labels`/`ISO_scores` columns added. End state: every
+   `grove_forest/<raw_file>.parquet` carries feature, PSA, and IForest columns together,
+   updated in place at each stage.
 
-![Workflow](/cmnfs/proj/denovo_fdr/tools/grovems/docs/assets/full_pipeline.png)
+![Workflow](docs/assets/full_pipeline.png)
 
 ## Quickstart
 
@@ -82,4 +88,5 @@ defaults, and comments. Notable ones:
 | `num_threads` / `psa_max_workers` / `percolator_threads` | `null` (-> `os.cpu_count()`) / `null` (-> `os.cpu_count()`) / `3` | worker/thread counts per stage; match these to your `#SBATCH --cpus-per-task` on a cluster |
 | `psa_max_raw_files` | `null` | limit PSA to the first N raw files, for testing |
 | `iforest_features` | (see file) | SUOD feature columns to train/score on -- inlined here instead of a separate config file |
-| `psa_merged_scan_dir` | `null` | only used when `run_psa: false` -- external `psa_dataframes/merged_SCAN` for a standalone IForest run |
+| `overwrite_outputs` | `false` | overwrite existing per-raw-file outputs (`merged/`, `grove_forest/`) instead of skipping raw files already processed |
+| `grove_forest_dir` | `null` | only used when `run_psa: false` -- external `grove_forest/` directory for a standalone IForest run |

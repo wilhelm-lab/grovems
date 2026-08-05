@@ -53,8 +53,7 @@ percolator_verbose: 3
 
 # ---- psa stage ----
 psa_max_raw_files: null      # limit to first N raw files, for testing
-psa_rebuild_cache: false     # rebuild cached PIN/percolator partitions
-psa_overwrite_outputs: false # overwrite existing per-RAW output partitions
+overwrite_outputs: false     # overwrite existing per-RAW output files (merged/, grove_forest/)
 psa_max_workers: null        # unset uses os.cpu_count()
 
 # ---- iforest stage ----
@@ -73,5 +72,5 @@ iforest_features:
   - fraction_observed_but_not_predicted_vs_predicted
   - spectral_angle
 # Only needed when run_iforest is true but run_psa is false (standalone iforest run);
-# otherwise the PSA stage's own merged_SCAN output is used directly.
-psa_merged_scan_dir: null
+# otherwise the PSA stage's own grove_forest/ output is used directly.
+grove_forest_dir: null

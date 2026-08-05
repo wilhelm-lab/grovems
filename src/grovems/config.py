@@ -74,8 +74,7 @@ class GrovemsConfig:
 
     # ---- psa stage ----
     psa_max_raw_files: Optional[int] = None  # limit to first N raw files, for testing
-    psa_rebuild_cache: bool = False  # rebuild cached PIN/percolator partitions
-    psa_overwrite_outputs: bool = False  # overwrite existing per-RAW output partitions
+    overwrite_outputs: bool = False  # overwrite existing per-RAW output files (merged/, grove_forest/)
     psa_max_workers: Optional[int] = None  # defaults to os.cpu_count() if unset
 
     # ---- iforest stage ----
@@ -83,8 +82,8 @@ class GrovemsConfig:
     # config_train.yaml file.
     iforest_features: list[str] = dataclasses.field(default_factory=list)
     # Only needed when run_iforest is true but run_psa is false (standalone iforest run);
-    # otherwise the PSA stage's own merged_SCAN output is used directly.
-    psa_merged_scan_dir: Optional[str] = None
+    # otherwise the PSA stage's own grove_forest/ output is used directly.
+    grove_forest_dir: Optional[str] = None
 
     @classmethod
     def from_yaml(cls, path: Union[str, Path]) -> "GrovemsConfig":

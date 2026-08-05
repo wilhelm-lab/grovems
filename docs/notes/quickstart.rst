@@ -24,8 +24,8 @@
    Standalone IForest run
    ***********************
 
-   If you already have a ``psa_dataframes/merged_SCAN`` from an earlier
-   ``run_psa: true`` run, you can run just the IForest stage against it:
+   If you already have a ``grove_forest/`` directory from an earlier ``run_psa: true``
+   run, you can run just the IForest stage against it:
 
    .. code-block:: bash
 
@@ -33,7 +33,7 @@
        --set run_rescoring=false \
        --set run_psa=false \
        --set run_iforest=true \
-       --set psa_merged_scan_dir=/path/to/psa_dataframes/merged_SCAN
+       --set grove_forest_dir=/path/to/output/rescoring/grove_forest
 
    On a SLURM cluster
    *******************
