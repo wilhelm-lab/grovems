@@ -1,0 +1,8 @@
+__version__ = "0.0.1"
+__author__ = "Wilhelm Lab"
+__author_email__ = ""
+__license__ = "MIT"
+__description__ = "Oktoberfest/Percolator rescoring + PSA + SUOD IForest scoring for denovo_fdr"
+__package__ = "grovems"
+__copyright__ = "2026, Wilhelm Lab, TU Munich, School of Life Sciences"
+__github_url__ = "https://github.com/wilhelm-lab/grovems"

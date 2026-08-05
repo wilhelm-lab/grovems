@@ -1,0 +1,270 @@
+from __future__ import annotations
+
+import logging
+from collections import Counter
+from typing import Any, Optional
+
+from .psa_event_detection import EventDetectionMixin
+from .psa_event_labeling import EventLabelingMixin
+from .psa_levenshtein import LevenshteinMixin
+from .psa_mass_utils import MassUtilsMixin
+from .psa_result import PSAResult
+
+__all__ = ["PSA", "PSAResult"]
+
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
+
+DEBUG_LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
+
+
+class PSA(MassUtilsMixin, LevenshteinMixin, EventDetectionMixin, EventLabelingMixin):
+    """Classifies the difference between two peptide sequences (see module docstring)."""
+
+    _debug_handler: Optional[logging.Handler] = None
+
+    def __init__(
+        self,
+        sequence1: Optional[str] = None,
+        sequence2: Optional[str] = None,
+        *,
+        debug: bool = False,
+    ) -> None:
+        """Create a PSA classifier, optionally setting the sequence pair immediately.
+
+        Args:
+            sequence1: First sequence. Must be given together with ``sequence2``, or
+                left unset (call :meth:`set_sequences` later).
+            sequence2: Second sequence.
+            debug: Enable verbose debug logging of every intermediate step.
+        """
+        self.result = PSAResult()
+        self.debug = debug
+        self.aligner = self.build_aligner()
+        self.sequence1: Optional[str] = None
+        self.mass_1: Optional[float] = None
+        self.sequence2: Optional[str] = None
+        self.mass_2: Optional[float] = None
+
+        if sequence1 is not None or sequence2 is not None:
+            if sequence1 is None or sequence2 is None:
+                raise ValueError("Provide both sequence1 and sequence2, or neither.")
+            self.set_sequences(sequence1, sequence2)
+
+    def set_debug(self, enabled: bool = True) -> None:
+        """Enable or disable verbose debug logging."""
+        self.debug = enabled
+        self._debug("PSA debug logging enabled")
+
+    def enable_debug(self) -> None:
+        """Shorthand for ``set_debug(True)``."""
+        self.set_debug(True)
+
+    def disable_debug(self) -> None:
+        """Shorthand for ``set_debug(False)``."""
+        self.set_debug(False)
+
+    @classmethod
+    def _get_debug_handler(cls) -> logging.Handler:
+        if cls._debug_handler is None:
+            handler = logging.StreamHandler()
+            handler.setLevel(logging.DEBUG)
+            handler.setFormatter(logging.Formatter(DEBUG_LOG_FORMAT))
+            cls._debug_handler = handler
+        return cls._debug_handler
+
+    def _debug(self, msg: str, *args: Any) -> None:
+        if not self.debug:
+            return
+        record = logger.makeRecord(
+            logger.name,
+            logging.DEBUG,
+            __file__,
+            0,
+            msg,
+            args,
+            None,
+        )
+        self._get_debug_handler().emit(record)
+
+    def set_sequences(self, sequence1: str, sequence2: str, *, reset_result: bool = True) -> None:
+        """Set the sequence pair to compare, computing their masses and resetting the result.
+
+        Args:
+            sequence1: First sequence.
+            sequence2: Second sequence.
+            reset_result: If ``True`` (default), clear any previous classification
+                result before recording the new sequence pair.
+        """
+        self.sequence1 = sequence1
+        self.sequence2 = sequence2
+        self.mass_1 = float(self.calculate_mass(sequence1))
+        self.mass_2 = float(self.calculate_mass(sequence2))
+        self._debug(
+            "PSA sequences set: seq1=%s seq2=%s len1=%d len2=%d mass1=%.4f mass2=%.4f",
+            sequence1,
+            sequence2,
+            len(sequence1),
+            len(sequence2),
+            self.mass_1,
+            self.mass_2,
+        )
+
+        if reset_result:
+            self.result.reset()
+
+        self.result.update(
+            peptide_sequence=(sequence1, sequence2),
+            monoisotopic_mass=(self.mass_1, self.mass_2),
+        )
+
+    def check_anagram(self) -> None:
+        """Set ``self.anagram`` to whether ``sequence1``/``sequence2`` are global anagrams."""
+        self.anagram = (len(self.sequence1) == len(self.sequence2)) and (
+            Counter(self.sequence1) == Counter(self.sequence2)
+        )
+
+    def select_event(self, selected_event: str, event_details: Any) -> None:
+        """Record the classified event (and its details) onto ``self.result``.
+
+        Args:
+            selected_event: Event name to record as ``self.result.selected_event``.
+            event_details: Event-specific details, stored under ``selected_event`` in
+                ``self.result.details`` (skipped if ``None``).
+        """
+        self._debug(
+            "PSA event selected: event=%s tier=%d lev_distance=%d isobaric=%s anagram=%s details=%s",
+            selected_event,
+            self.result.tier,
+            self.result.levenshtein_distance,
+            self.isobaric,
+            self.anagram,
+            event_details,
+        )
+
+        self.result.update(
+            selected_event=selected_event,
+            **({selected_event: event_details} if event_details is not None else {}),
+        )
+
+    def assign_similarity(self, identities: int) -> None:
+        """Score similarity from an identity count and record it (plus its coarse level).
+
+        Args:
+            identities: Number of identical aligned positions.
+        """
+        normalized_identity = identities / max(len(self.sequence1), len(self.sequence2))
+        divisor = len(self.sequence1) + len(self.sequence2) - identities
+        jaccard = identities / divisor if divisor else 1.0
+        if normalized_identity < 0.30:
+            similarity_level = "DIFFERENT"
+        elif normalized_identity >= 0.3 and normalized_identity < 0.5:
+            similarity_level = "SOMEWHAT_RELATED"
+        elif normalized_identity >= 0.5 and normalized_identity < 0.7:
+            similarity_level = "SIMILAR"
+        else:
+            similarity_level = "VERY_SIMILAR"
+        self.result.update(
+            identity_count=identities,
+            normalized_identity=normalized_identity,
+            jaccard_similarity=jaccard,
+            similarity=normalized_identity,
+            similarity_level=similarity_level,
+        )
+        self._debug(
+            "PSA similarity assigned: seq1=%s seq2=%s identities=%d normalized_identity=%.4f jaccard=%.4f level=%s",
+            self.sequence1,
+            self.sequence2,
+            identities,
+            normalized_identity,
+            jaccard,
+            similarity_level,
+        )
+
+    def tier_assignment(self) -> None:
+        """Run the full PSA rulebook: align + score similarity, assign a tier, detect the event.
+
+        In order: align the sequence pair and score their similarity; assign the PSA
+        tier from their Levenshtein distance; detect the observed event (or events)
+        and record it for reporting.
+        """
+        self.isobaric = self.same_mass(self.mass_1, self.mass_2)
+        self.check_anagram()
+        self.result.update(isobaric=self.isobaric, anagram=self.anagram)
+        self.sequence_alignment()
+        self.aln_cnt = self.result.alignment.counts()
+        self.assign_similarity(self.aln_cnt.identities)
+        levenshtein_distance = self.levenshtein_distance(self.sequence1, self.sequence2)
+        final_tier = self.levenshtein_tier(levenshtein_distance)
+        observed_changes = self.collect_observed_changes()
+        self.result.update(
+            tier=final_tier,
+            levenshtein_distance=levenshtein_distance,
+            final_tier=final_tier,
+            alignment_counts={
+                "identities": self.aln_cnt.identities,
+                "mismatches": self.aln_cnt.mismatches,
+                "gaps": self.aln_cnt.gaps,
+            },
+            observed_changes=observed_changes,
+        )
+        self._debug(
+            "Starting PSA tier assignment: seq1=%s seq2=%s isobaric=%s anagram=%s " "lev_distance=%d final_tier=%d",
+            self.sequence1,
+            self.sequence2,
+            self.isobaric,
+            self.anagram,
+            levenshtein_distance,
+            final_tier,
+        )
+
+        raw_candidates = self.collect_event_candidates()
+        if raw_candidates:
+            self.result.update(
+                raw_candidate_events=[self.summarize_candidate(candidate) for candidate in raw_candidates]
+            )
+
+            if len(raw_candidates) == 1:
+                selected_event, event_details = raw_candidates[0]
+                self.select_event(selected_event, event_details)
+            else:
+                self.assign_multi_event_variant(raw_candidates)
+            return
+
+        self.select_event("UNCLASSIFIED_VARIANT", None)
+        self._debug("No explicit event matched; keeping Levenshtein-based tier with unclassified event")
+
+    def classify(self) -> None:
+        """Run :meth:`tier_assignment` and build the final PSA label/change summary."""
+        self.tier_assignment()
+        change_summary = self.event_change_summary(
+            self.result.selected_event,
+            self.result.details.get(self.result.selected_event),
+        )
+        label_event_name = self.label_event_name()
+        isobaric_label = "ISOBARIC" if self.result.isobaric else "NONISOBARIC"
+        label = f"PSA - Tier {self.result.tier} - {isobaric_label} - {label_event_name}"
+        self.result.update(
+            label=f"{label}",
+            label_event_name=label_event_name,
+            isobaric_label=isobaric_label,
+            change_summary=change_summary,
+        )
+        logger.debug(
+            "PSA classified: seq1=%s seq2=%s label=%s similarity=%.4f lev_distance=%d",
+            self.sequence1,
+            self.sequence2,
+            self.result.label,
+            self.result.similarity,
+            self.result.levenshtein_distance,
+        )
+
+    def __str__(self) -> str:
+        return str(self.result)
+
+    def __repr__(self) -> str:
+        return repr(self.result)
+
+    def clasify(self) -> None:
+        """Backwards-compatible misspelled alias for :meth:`classify`."""
+        self.classify()
