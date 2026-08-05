@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from grovems import __version__, runner
 from grovems.config import GrovemsConfig
@@ -30,11 +31,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    configure_logging()
     args = parse_args()
 
     config = GrovemsConfig.from_yaml(args.config)
     config.apply_overrides(args.overrides)
+
+    outdir = Path(config.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    configure_logging(log_file=outdir / "grovems.log")
+
     runner.run(config)
 
 
