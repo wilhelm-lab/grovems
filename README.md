@@ -76,7 +76,10 @@ grovems run --config my_config.yaml \
 
 Any config value can be overridden per-run with `--set key=value` (repeatable) instead
 of editing the file. Every stage's log output is both printed to stdout and appended to
-`<outdir>/grovems.log`. Full usage (SLURM submission, standalone IForest runs) is in
+`<outdir>/grovems.log`, and the fully-resolved config (input file + any `--set`
+overrides applied) is written to `<outdir>/config.yaml` -- a permanent, self-contained
+record of exactly what produced that run's output, independent of whatever `--set` flags
+were used to launch it. Full usage (SLURM submission, standalone IForest runs) is in
 [`docs/notes/quickstart.rst`](docs/notes/quickstart.rst); one-time setup is in
 [`docs/notes/installation.rst`](docs/notes/installation.rst).
 

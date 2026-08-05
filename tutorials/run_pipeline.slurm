@@ -10,22 +10,22 @@
 
 set -euo pipefail
 
-#=== Configuration -- edit these for your run ===#
+#=== Configuration ===#
 PIPELINE_DIR="/cmnfs/proj/denovo_fdr/tools/grovems"
 CONFIG="${PIPELINE_DIR}/assets/default_config.yaml"
 
 DATABASE_SEARCH_PATH="/cmnfs/proj/denovo_fdr/results/proteometools/results/search/fragpipe"
 DENOVO_SEARCH_PATH="/cmnfs/proj/denovo_fdr/results/proteometools/results/search/casanovo"
 RAWDATA_PATH="/cmnfs/proj/denovo_fdr/results/proteometools/raw/mzml"
-OUTDIR="/cmnfs/proj/denovo_fdr/results/proteometools/results/run.$(date +%d%m%Y).grovems"
+OUTDIR="/cmnfs/proj/denovo_fdr/results/proteometools/results/run.$(date +%d%m%Y).grovems.${SLURM_JOB_ID}"
 
-#=== Environment -- edit to match how you installed grovems (see docs/notes/installation.rst) ===#
+#=== Environment ===#
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate grovems
 
 #=== START ===#
 echo "=== Starting grovems at $(date) ==="
-
+#NOTE: "--set" overrides config parameter and should be "key=value"
 grovems run --config "${CONFIG}" \
     --set database_search_path="${DATABASE_SEARCH_PATH}" \
     --set denovo_search_path="${DENOVO_SEARCH_PATH}" \

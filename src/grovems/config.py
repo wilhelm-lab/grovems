@@ -133,3 +133,13 @@ class GrovemsConfig:
             value = yaml.safe_load(raw_value)
             logger.info("Overriding %s = %r", key, value)
             setattr(self, key, value)
+
+    def to_yaml(self, path: Union[str, Path]) -> None:
+        """Write this config's current values (including any applied overrides) to a YAML file.
+
+        Used to record the exact, fully-resolved config a run used, as a permanent copy
+        alongside its output -- distinct from the input config file, which may not
+        reflect ``--set`` overrides applied on top of it at the command line.
+        """
+        with open(path, "w") as f:
+            yaml.safe_dump(dataclasses.asdict(self), f, sort_keys=False)

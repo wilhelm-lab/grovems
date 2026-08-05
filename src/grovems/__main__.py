@@ -39,6 +39,7 @@ def main() -> None:
     outdir = Path(config.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     configure_logging(log_file=outdir / "grovems.log")
+    config.to_yaml(outdir / "config.yaml")
 
     runner.run(config)
 
