@@ -157,7 +157,33 @@ def _relink(source: Path, dest: Path) -> None:
     dest.symlink_to(resolved_source, target_is_directory=resolved_source.is_dir())
 
 
-def _drop_columns(input_file: str, output_file: str, delimiter: str, columns_to_drop: list[str]) -> None:
+def _require_matching_columns(database_columns: list[str], denovo_columns: list[str]) -> None:
+    """Verify the two branches' filtered rescore.tab columns match, name and order.
+
+    De novo's Percolator rescoring is static (``--init-weights``/``--static``): it
+    applies the database branch's learned weight vector positionally to de novo's
+    feature columns. If the two rescore.tab files don't end up with identical,
+    identically-ordered columns after filtering -- whether from
+    drop_columns_database/drop_columns_denovo not actually aligning, or from
+    database_oktoberfest_dir/denovo_oktoberfest_dir pointing at runs with different
+    feature sets -- those weights would be silently misapplied to the wrong features.
+    """
+    if database_columns == denovo_columns:
+        return
+    database_only = [c for c in database_columns if c not in denovo_columns]
+    denovo_only = [c for c in denovo_columns if c not in database_columns]
+    raise ValueError(
+        "database and de novo rescore.tab have different columns after filtering, but de "
+        "novo's Percolator rescoring reuses the database branch's weights positionally and "
+        "needs identical, identically-ordered feature columns.\n"
+        f"database-only columns: {database_only}\n"
+        f"de novo-only columns:  {denovo_only}\n"
+        "Adjust drop_columns_database/drop_columns_denovo (or the reused Oktoberfest "
+        "directories) so the surviving feature columns match."
+    )
+
+
+def _drop_columns(input_file: str, output_file: str, delimiter: str, columns_to_drop: list[str]) -> list[str]:
     """Read a delimited file, drop the given columns, and write the result.
 
     Args:
@@ -166,12 +192,17 @@ def _drop_columns(input_file: str, output_file: str, delimiter: str, columns_to_
             to filter in place -- the read completes before the write starts).
         delimiter: Field delimiter, e.g. ``"\\t"``.
         columns_to_drop: Column names to drop; names not present are ignored.
+
+    Returns:
+        The resulting column names, in order -- used to verify database/de novo feature
+        parity before de novo's static Percolator rescoring (see :func:`run`).
     """
     logger.info("Dropping columns %s: %s -> %s", columns_to_drop, input_file, output_file)
     df = pd.read_csv(input_file, sep=delimiter, engine="c")
     df = df.drop(columns=columns_to_drop, errors="ignore")
     df.to_csv(output_file, sep=delimiter, index=False)
     logger.info("Wrote %d rows, %d columns to '%s'", len(df), len(df.columns), output_file)
+    return list(df.columns)
 
 
 def _parse_and_write_avg_weights(path: str, out_path: str, decimals: int = 4) -> None:
@@ -344,19 +375,25 @@ def run(config: GrovemsConfig, outdir: Path) -> RescoringResult:
     num_threads = config.num_threads or os.cpu_count() or 1
 
     # --- database branch ---
-    database_dir = rescoring_dir / "oktoberfest_database"
-    _run_oktoberfest_stage(
-        config,
-        rescoring_dir / "rescoring_config_database.json",
-        output_dir=database_dir,
-        search_path=config.database_search_path,
-        search_type=config.database_search_type,
-        num_threads=num_threads,
-    )
+    if config.database_oktoberfest_dir:
+        database_dir = Path(config.database_oktoberfest_dir)
+        logger.info("Reusing existing Oktoberfest database results: %s", database_dir)
+    else:
+        database_dir = rescoring_dir / "oktoberfest_database"
+        _run_oktoberfest_stage(
+            config,
+            rescoring_dir / "rescoring_config_database.json",
+            output_dir=database_dir,
+            search_path=config.database_search_path,
+            search_type=config.database_search_type,
+            num_threads=num_threads,
+        )
 
     database_percolator_dir = database_dir / "results" / "percolator"
     database_rescore_tab = database_percolator_dir / "rescore.tab"
-    _drop_columns(str(database_rescore_tab), str(database_rescore_tab), "\t", config.drop_columns_database.split())
+    database_feature_columns = _drop_columns(
+        str(database_rescore_tab), str(database_rescore_tab), "\t", config.drop_columns_database.split()
+    )
 
     database_weights = database_percolator_dir / "rescore.percolator.weights.csv"
     database_psms = database_percolator_dir / "rescore.percolator.psms.txt"
@@ -397,23 +434,30 @@ def run(config: GrovemsConfig, outdir: Path) -> RescoringResult:
     )
 
     # --- de novo branch (reuses database's ce_calibration/rt_model and weights) ---
-    denovo_dir = rescoring_dir / "oktoberfest_denovo"
-    (denovo_dir / "results").mkdir(parents=True, exist_ok=True)
-    _relink(database_dir / "results" / "ce_calibration", denovo_dir / "results" / "ce_calibration")
-    _relink(database_dir / "results" / "rt_model", denovo_dir / "results" / "rt_model")
+    if config.denovo_oktoberfest_dir:
+        denovo_dir = Path(config.denovo_oktoberfest_dir)
+        logger.info("Reusing existing Oktoberfest de novo results: %s", denovo_dir)
+    else:
+        denovo_dir = rescoring_dir / "oktoberfest_denovo"
+        (denovo_dir / "results").mkdir(parents=True, exist_ok=True)
+        _relink(database_dir / "results" / "ce_calibration", denovo_dir / "results" / "ce_calibration")
+        _relink(database_dir / "results" / "rt_model", denovo_dir / "results" / "rt_model")
 
-    _run_oktoberfest_stage(
-        config,
-        rescoring_dir / "rescoring_config_denovo.json",
-        output_dir=denovo_dir,
-        search_path=config.denovo_search_path,
-        search_type=config.denovo_search_type,
-        num_threads=num_threads,
-    )
+        _run_oktoberfest_stage(
+            config,
+            rescoring_dir / "rescoring_config_denovo.json",
+            output_dir=denovo_dir,
+            search_path=config.denovo_search_path,
+            search_type=config.denovo_search_type,
+            num_threads=num_threads,
+        )
 
     denovo_percolator_dir = denovo_dir / "results" / "percolator"
     denovo_rescore_tab = denovo_percolator_dir / "rescore.tab"
-    _drop_columns(str(denovo_rescore_tab), str(denovo_rescore_tab), "\t", config.drop_columns_denovo.split())
+    denovo_feature_columns = _drop_columns(
+        str(denovo_rescore_tab), str(denovo_rescore_tab), "\t", config.drop_columns_denovo.split()
+    )
+    _require_matching_columns(database_feature_columns, denovo_feature_columns)
 
     denovo_avg_weights = denovo_percolator_dir / "rescore.percolator.weights.avg.csv"
     _parse_and_write_avg_weights(str(database_weights), str(denovo_avg_weights))

@@ -28,9 +28,14 @@ def run(config: GrovemsConfig) -> None:
 
     rescoring_result = None
     if config.run_rescoring:
-        _require(config, "database_search_path")
-        _require(config, "denovo_search_path")
-        _require(config, "rawdata_path")
+        # database_search_path/denovo_search_path/rawdata_path are only needed for
+        # branches that aren't reusing an existing Oktoberfest output directory.
+        if not config.database_oktoberfest_dir:
+            _require(config, "database_search_path")
+        if not config.denovo_oktoberfest_dir:
+            _require(config, "denovo_search_path")
+        if not (config.database_oktoberfest_dir and config.denovo_oktoberfest_dir):
+            _require(config, "rawdata_path")
         logger.info("Running rescoring stage")
         rescoring_result = rs.run(config, outdir)
 

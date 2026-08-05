@@ -12,7 +12,13 @@ similarity assignment) -> isolation-forest (IForest/SUOD) scoring, for the de no
    model, and a Percolator `.tab`/pin input. The de novo branch reuses the database
    branch's CE-calibration and RT-model (same instrument run) instead of refitting them.
 2. Filters `rescore.tab` **in place** (drops unwanted columns, overwrites the same
-   file -- no separate filtered copy).
+   file -- no separate filtered copy). Since de novo rescoring is static (next step)
+   and applies the database branch's weights positionally, the two branches' filtered
+   columns must end up identical and identically ordered -- checked explicitly
+   (`_require_matching_columns`) before de novo's Percolator run, so a
+   `drop_columns_database`/`drop_columns_denovo` mismatch (or reusing an existing
+   Oktoberfest directory with a different feature set) fails loudly instead of silently
+   misapplying weights to the wrong features.
 3. Runs Percolator against that filtered `rescore.tab`. The de novo branch averages the
    database branch's learned weights first and rescores **statically** (no retraining).
 4. Merges `rescore.tab` + Percolator's PSM output + that branch's own `msms/*.rescore`
@@ -79,6 +85,7 @@ defaults, and comments. Notable ones:
 | Key | Default | Meaning |
 |---|---|---|
 | `run_rescoring` / `run_psa` / `run_iforest` | `true` / `true` / `true` | enable/disable each stage. `run_psa` requires `run_rescoring` in the same invocation. |
+| `database_oktoberfest_dir` / `denovo_oktoberfest_dir` | `null` / `null` | reuse an existing Oktoberfest output directory for that branch instead of running Oktoberfest (used in place); set one, both, or neither |
 | `drop_columns_database` | `lda_scores annotated_ions delta_mass_ppm log10_evalue next_score collision_energy_aligned` | columns dropped before training Percolator on the database pin |
 | `drop_columns_denovo` | `lda_scores collision_energy_aligned` | columns dropped before scoring the de novo pin |
 | `percolator_exe` | `percolator` | command/path used to invoke percolator (provided externally); point at an absolute path for a specific local install |

@@ -18,6 +18,13 @@ database_search_type: Msfragger
 denovo_search_type: Casanovo
 spectra_type: mzML
 
+# Point at an existing Oktoberfest output directory to skip running Oktoberfest for
+# that branch (used in place -- rescore.tab still gets filtered/consumed as usual).
+# Set one, both, or neither; the corresponding *_search_path/rawdata_path above are
+# only required for branches that aren't reused this way.
+database_oktoberfest_dir: null
+denovo_oktoberfest_dir: null
+
 # ---- rescoring stage: Oktoberfest / Prosit ----
 irt_model: Prosit_2019_irt
 intensity_model: Prosit_2020_intensity_HCD

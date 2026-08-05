@@ -33,6 +33,16 @@ class GrovemsConfig:
     denovo_search_type: str = "Casanovo"
     spectra_type: str = "mzML"
 
+    # Reuse an existing Oktoberfest output directory instead of running Oktoberfest for
+    # that branch (predictions/ce_calibration/rt_model/msms/rescore.tab already there,
+    # as if Oktoberfest had just finished running in that location). Used in place:
+    # rescore.tab is still filtered in place and, with Percolator's output, deleted once
+    # merged/ is built -- same lifecycle as a freshly-run branch. Set one, both, or
+    # neither; database_search_path/denovo_search_path/rawdata_path are only required
+    # for branches that aren't reused this way.
+    database_oktoberfest_dir: Optional[str] = None
+    denovo_oktoberfest_dir: Optional[str] = None
+
     # ---- rescoring stage: Oktoberfest / Prosit ----
     irt_model: str = "Prosit_2019_irt"
     intensity_model: str = "Prosit_2020_intensity_HCD"
