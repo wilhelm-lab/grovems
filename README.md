@@ -46,6 +46,21 @@ similarity assignment) -> isolation-forest (IForest/SUOD) scoring, for the de no
    `grove_forest/<raw_file>.parquet` carries feature, PSA, and IForest columns together,
    updated in place at each stage.
 
+**`postprocess/`** (`postprocess.run()`)
+7. Builds an empirical CDF of `ISO_scores` from the trusted shared PSMs -- the same
+   `_merge == "shared"`/target/positive-database-score population IForest itself trains
+   on (`iforest.trusted_shared_mask`) -- then adds a `TP_GOODNESS` column to every PSM in
+   every `grove_forest/*.parquet` file: the fraction of that reference at least as
+   anomalous as this PSM (1.0 = better than every reference PSM, 0.0 = worse than all of
+   them). Separately, a two-sample Kolmogorov-Smirnov test compares the reference
+   distribution against `database_only` and against `denovo_only` `ISO_scores`; each
+   comparison's point of maximum divergence (`ks_2samp`'s `statistic_location`) is that
+   comparison's natural accept/reject boundary, and averaging the two locations gives one
+   cutoff used to label every `database_only`/`denovo_only` PSM `GOOD` or `BAD`. Writes
+   `grove_forest/qc/ks_vs_tp.svg`, `qc/ks_vs_tp_summary.csv` (D, p-value, location per
+   comparison, plus the averaged cutoff), and `qc/good_bad_database_only.csv` /
+   `qc/good_bad_denovo_only.csv`.
+
 ![Pipeline overview: FragPipe/Casanovo search results feed PSMs into Oktoberfest feature generation, then PSA similarity grading, then isolation-forest rescoring](docs/assets/full_pipeline.png)
 
 ## Quickstart
@@ -84,7 +99,7 @@ defaults, and comments. Notable ones:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `run_rescoring` / `run_psa` / `run_iforest` | `true` / `true` / `true` | enable/disable each stage. `run_psa` requires `run_rescoring` in the same invocation. |
+| `run_rescoring` / `run_psa` / `run_iforest` / `run_postprocess` | `true` / `true` / `true` / `true` | enable/disable each stage. `run_psa` requires `run_rescoring` in the same invocation; `run_postprocess` needs `ISO_scores` (from `run_iforest`, this invocation or an existing `grove_forest_dir`). |
 | `database_oktoberfest_dir` / `denovo_oktoberfest_dir` | `null` / `null` | reuse an existing Oktoberfest output directory for that branch instead of running Oktoberfest (used in place); set one, both, or neither |
 | `drop_columns_database` | `lda_scores annotated_ions delta_mass_ppm log10_evalue next_score collision_energy_aligned` | columns dropped before training Percolator on the database pin |
 | `drop_columns_denovo` | `lda_scores collision_energy_aligned` | columns dropped before scoring the de novo pin |
@@ -95,4 +110,4 @@ defaults, and comments. Notable ones:
 | `psa_max_raw_files` | `null` | limit PSA to the first N raw files, for testing |
 | `iforest_features` | (see file) | SUOD feature columns to train/score on -- inlined here instead of a separate config file |
 | `overwrite_outputs` | `false` | overwrite existing per-raw-file outputs (`merged/`, `grove_forest/`) instead of skipping raw files already processed |
-| `grove_forest_dir` | `null` | only used when `run_psa: false` -- external `grove_forest/` directory for a standalone IForest run |
+| `grove_forest_dir` | `null` | only used when `run_psa: false` -- external `grove_forest/` directory for a standalone IForest and/or postprocess run (postprocess additionally needs it if `run_iforest: false` too, pointing at already-IForest-scored data) |

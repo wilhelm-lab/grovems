@@ -52,17 +52,31 @@ def require_unique_columns(df: pd.DataFrame, frame_name: str) -> None:
         raise ValueError(f"{frame_name} has duplicate columns after suffix normalization: {duplicated}")
 
 
+def trusted_shared_mask(merged_df: pd.DataFrame) -> pd.Series:
+    """Rows counted as high-confidence shared PSMs: shared, target, positive database score.
+
+    The single definition of "trustworthy shared PSM" used both to pick IForest's
+    training candidates (:func:`select_training_candidates`) and, downstream, as the
+    ECDF reference population in ``grovems.postprocess`` -- kept in one place so the
+    two stages can't silently drift apart.
+    """
+    return (
+        (merged_df["_merge"] == "shared")
+        & (merged_df["Label_database"] == 1)
+        & (merged_df["percolator_score_database"] > 0)
+    )
+
+
 def select_training_candidates(merged_df: pd.DataFrame) -> pd.DataFrame:
     """Pick one file's high-confidence shared-PSM rows, before the global percentile cutoff.
 
-    The cheap per-file filter for pass 1 -- only ``_merge == "shared"`` target
-    (``Label_database == 1``) PSMs with a positive database Percolator score are
+    The cheap per-file filter for pass 1 -- only :func:`trusted_shared_mask` rows are
     candidates at all; :func:`build_training_set` applies the actual cutoff once
     candidates from every file have been combined.
     """
     base_cols = ["SpecId", "_merge"]
     cols = base_cols + select_suffixed_search_columns(merged_df, "database", set(base_cols))
-    return merged_df.query("_merge == 'shared' and Label_database == 1 and percolator_score_database > 0")[cols].copy()
+    return merged_df.loc[trusted_shared_mask(merged_df), cols].copy()
 
 
 def build_training_set(candidates: pd.DataFrame) -> pd.DataFrame:

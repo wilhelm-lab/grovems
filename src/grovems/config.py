@@ -22,6 +22,7 @@ class GrovemsConfig:
     run_rescoring: bool = True
     run_psa: bool = True
     run_iforest: bool = True
+    run_postprocess: bool = True
 
     outdir: str = "results"
 
@@ -91,8 +92,10 @@ class GrovemsConfig:
     # SUOD feature columns to train/score on -- inlined here rather than a separate
     # config_train.yaml file.
     iforest_features: list[str] = dataclasses.field(default_factory=list)
-    # Only needed when run_iforest is true but run_psa is false (standalone iforest run);
-    # otherwise the PSA stage's own grove_forest/ output is used directly.
+    # Only needed when run_iforest and/or run_postprocess are true but run_psa is false
+    # (standalone iforest/postprocess run); otherwise the PSA stage's own grove_forest/
+    # output (or, for a postprocess-only run, the IForest stage's own output) is used
+    # directly.
     grove_forest_dir: Optional[str] = None
 
     @classmethod
