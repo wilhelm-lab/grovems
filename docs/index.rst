@@ -21,6 +21,9 @@
 
    Oktoberfest/Percolator rescoring + PSA + SUOD IForest scoring for denovo_fdr.
 
+   .. image:: assets/full_pipeline.png
+      :alt: Pipeline overview: FragPipe/Casanovo search results feed PSMs into Oktoberfest feature generation, then PSA similarity grading, then isolation-forest rescoring
+
    .. automodule:: {{ project }}
        :members:
 
