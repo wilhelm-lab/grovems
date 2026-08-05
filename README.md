@@ -3,7 +3,6 @@
 A plain, installable Python package: Oktoberfest/Percolator rescoring -> PSA (peptide
 similarity assignment) -> isolation-forest (IForest/SUOD) scoring, for the de novo sequencing.
 
-![Pipeline overview: FragPipe/Casanovo search results feed PSMs into Oktoberfest feature generation, then PSA similarity grading, then isolation-forest rescoring](docs/assets/full_pipeline.png)
 
 ## What it does
 
@@ -41,7 +40,7 @@ similarity assignment) -> isolation-forest (IForest/SUOD) scoring, for the de no
    `grove_forest/<raw_file>.parquet` carries feature, PSA, and IForest columns together,
    updated in place at each stage.
 
-![Workflow](docs/assets/full_pipeline.png)
+![Pipeline overview: FragPipe/Casanovo search results feed PSMs into Oktoberfest feature generation, then PSA similarity grading, then isolation-forest rescoring](docs/assets/full_pipeline.png)
 
 ## Quickstart
 
