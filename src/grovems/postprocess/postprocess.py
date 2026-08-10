@@ -26,6 +26,21 @@ SCORE_COLUMNS = {
     "SCORE_database": "DATABASE_SCORE",
     "percolator_score_database": "PERCOLATOR_SCORE_DATABASE",
 }
+AA_SCORE_LOWERCASE_THRESHOLD = 0.6
+
+
+def _lowercase_low_confidence_aa(sequence: str, aa_scores: str, threshold: float = AA_SCORE_LOWERCASE_THRESHOLD) -> str:
+    """Lowercase each residue in ``sequence`` whose aligned Casanovo AA score is below ``threshold``."""
+    scores = aa_scores.split(",")
+    if len(scores) != len(sequence):
+        logger.warning(
+            "SEQUENCE/AA_SCORE length mismatch (%d residues vs %d scores) for %r; leaving case as-is",
+            len(sequence),
+            len(scores),
+            sequence,
+        )
+        return sequence
+    return "".join(aa.lower() if float(score) < threshold else aa for aa, score in zip(sequence, scores))
 
 
 def _gather_reference_scores(files: list[Path]) -> np.ndarray:
@@ -118,12 +133,29 @@ def _plot_detection_level_counts(counts: pd.Series, out_path: Path) -> None:
 
 def _write_good_bad_lists(files: list[Path], cutoff: float, grove_forest_dir: Path, qc_dir: Path) -> None:
     """Pass 3: classify every PSM, plot the detection-level split, write good.csv/bad.csv."""
-    columns = [*ID_COLUMNS, "_merge", "ISO_scores", "TP_GOODNESS", "AA_SCORE", *SCORE_COLUMNS]
+    columns = [
+        *ID_COLUMNS,
+        "_merge",
+        "ISO_scores",
+        "TP_GOODNESS",
+        "AA_SCORE",
+        "SEQUENCE_database",
+        "SEQUENCE_denovo",
+        *SCORE_COLUMNS,
+    ]
     parts = [pd.read_parquet(path, columns=columns) for path in files]
 
     combined = pd.concat(parts, ignore_index=True)
     combined["DETECTION_LEVEL"] = combined.pop("_merge").map(DETECTION_LEVELS)
     combined["CASANOVO_AA_SCORE"] = combined.pop("AA_SCORE").str.replace("|", ",", regex=False)
+    combined["SEQUENCE"] = combined.pop("SEQUENCE_denovo").combine_first(combined.pop("SEQUENCE_database"))
+    has_aa_score = combined["CASANOVO_AA_SCORE"].notna()
+    combined.loc[has_aa_score, "SEQUENCE"] = [
+        _lowercase_low_confidence_aa(sequence, aa_scores)
+        for sequence, aa_scores in zip(
+            combined.loc[has_aa_score, "SEQUENCE"], combined.loc[has_aa_score, "CASANOVO_AA_SCORE"]
+        )
+    ]
     combined = combined.rename(columns=SCORE_COLUMNS)
     # ISO_scores is 0-1 (1=good, 0=bad); GOOD is now the >= side of the cutoff.
     combined["CALL"] = np.where(combined["ISO_scores"] >= cutoff, "GOOD", "BAD")
