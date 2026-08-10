@@ -43,6 +43,11 @@
    ``--mem``/``--time`` to your data volume, and pass matching values for
    ``num_threads``/``psa_max_workers``/``percolator_threads`` in the config.
 
+   To resubmit an existing run unchanged (e.g. after a transient failure), use
+   ``tutorials/resubmit_pipeline.slurm /path/to/existing/outdir`` -- it reruns that
+   run's own saved ``<outdir>/config.yaml``, so already-finished work is skipped
+   instead of redone.
+
    One real file, locally
    ************************
 

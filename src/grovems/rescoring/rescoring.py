@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import dataclasses
-import gc
 import json
 import logging
 import os
 import shlex
 import shutil
 import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from oktoberfest import runner as oktoberfest_runner
 
 from ..config import GrovemsConfig
@@ -101,17 +104,37 @@ def _build_oktoberfest_config(
     return cfg
 
 
-def _run_oktoberfest(config_path: Path) -> None:
+def _run_oktoberfest(config_path: Path, *, max_attempts: int = 3, retry_delay_seconds: float = 30.0) -> None:
+    """Run Oktoberfest, retrying the whole job a few times on failure.
+
+    Oktoberfest's JobPool.check_pool() treats any single worker exception -- including
+    a one-off dropped Koina gRPC request, which is not a systemic outage -- as fatal for
+    the entire pool and calls sys.exit(1), aborting a multi-hour run over one transient
+    network blip. Retrying is cheap and safe: Oktoberfest marks each per-raw-file step
+    done via .done files under proc/, so re-running run_job() skips everything already
+    completed and only redoes the file(s) that hadn't finished.
+    """
     logger.info("Running Oktoberfest: %s", config_path)
-    try:
-        oktoberfest_runner.run_job(str(config_path))
-    except SystemExit as exc:
-        # A worker pool failure inside Oktoberfest (JobPool.check_pool) calls
-        # sys.exit(1) instead of raising a normal exception -- catch it explicitly so it
-        # doesn't kill the whole grovems process.
-        raise RuntimeError(f"Oktoberfest exited (SystemExit({exc.code})) while running {config_path}") from exc
-    except Exception as exc:
-        raise RuntimeError(f"Oktoberfest failed while running {config_path}: {exc}") from exc
+    for attempt in range(1, max_attempts + 1):
+        try:
+            oktoberfest_runner.run_job(str(config_path))
+            return
+        except SystemExit as exc:
+            # A worker pool failure inside Oktoberfest (JobPool.check_pool) calls
+            # sys.exit(1) instead of raising a normal exception -- catch it explicitly so
+            # it doesn't kill the whole grovems process.
+            error = RuntimeError(f"Oktoberfest exited (SystemExit({exc.code})) while running {config_path}")
+            error.__cause__ = exc
+        except Exception as exc:
+            error = RuntimeError(f"Oktoberfest failed while running {config_path}: {exc}")
+            error.__cause__ = exc
+
+        if attempt == max_attempts:
+            raise error
+        logger.warning(
+            "Oktoberfest attempt %d/%d failed, retrying in %.0fs: %s", attempt, max_attempts, retry_delay_seconds, error
+        )
+        time.sleep(retry_delay_seconds)
 
 
 def _run_oktoberfest_stage(
@@ -250,19 +273,38 @@ def _extract_raw_file(spec_ids: pd.Series) -> pd.Series:
 def _partition_by_raw_file(
     input_path: Path, output_root: Path, *, id_column: str, sep: str, chunksize: int, label: str, usecols=None
 ) -> None:
-    """Chunk-read ``input_path``, split rows by RAW_FILE, write per-raw-file parquet parts."""
-    reader = pd.read_csv(input_path, sep=sep, chunksize=chunksize, usecols=usecols)
-    for chunk_idx, chunk in enumerate(reader):
-        if chunk.empty:
-            continue
-        chunk["RAW_FILE"] = _extract_raw_file(chunk[id_column])
-        chunk = chunk.loc[chunk["RAW_FILE"].notna()].copy()
-        for raw_file, part in chunk.groupby("RAW_FILE", sort=False):
-            raw_dir = output_root / _safe_raw_file(raw_file)
-            raw_dir.mkdir(parents=True, exist_ok=True)
-            part.to_parquet(raw_dir / f"{label}-{chunk_idx:06d}.parquet", index=False, engine="pyarrow")
-        del chunk
-        gc.collect()
+    """Chunk-read ``input_path``, split rows by RAW_FILE, append to one parquet file per raw file.
+
+    Keeps one open ``ParquetWriter`` per raw file across all chunks instead of writing a new
+    small file per chunk per raw file -- for a multi-million-row rescore.tab chunked at
+    PIN_CHUNKSIZE, the per-chunk version fans out into thousands of tiny files across ~90
+    raw-file directories, which is expensive filesystem-metadata churn (worse on NFS).
+    """
+    writers: dict[str, pq.ParquetWriter] = {}
+    try:
+        reader = pd.read_csv(input_path, sep=sep, chunksize=chunksize, usecols=usecols)
+        for chunk in reader:
+            if chunk.empty:
+                continue
+            chunk["RAW_FILE"] = _extract_raw_file(chunk[id_column])
+            chunk = chunk.loc[chunk["RAW_FILE"].notna()]
+            for raw_file, part in chunk.groupby("RAW_FILE", sort=False):
+                table = pa.Table.from_pandas(part, preserve_index=False)
+                writer = writers.get(raw_file)
+                if writer is None:
+                    raw_dir = output_root / _safe_raw_file(raw_file)
+                    raw_dir.mkdir(parents=True, exist_ok=True)
+                    writer = pq.ParquetWriter(raw_dir / f"{label}.parquet", table.schema)
+                    writers[raw_file] = writer
+                elif not table.schema.equals(writer.schema):
+                    # Chunk-local dtype inference (e.g. an int column that only turns out to
+                    # have nulls in a later chunk) can drift between chunks for the same raw
+                    # file; align to the first chunk's schema rather than failing the write.
+                    table = table.cast(writer.schema, safe=False)
+                writer.write_table(table)
+    finally:
+        for writer in writers.values():
+            writer.close()
 
 
 def _read_raw_partition(root: Path, raw_file: str, columns: Optional[list[str]] = None) -> pd.DataFrame:
@@ -361,7 +403,16 @@ def _merge_and_partition_branch(
 
 
 def run(config: GrovemsConfig, outdir: Path) -> RescoringResult:
-    """Run the rescoring stage: database Oktoberfest+Percolator+merge, then de novo.
+    """Run rescoring: database Oktoberfest, then de novo Oktoberfest, then Percolator + merge for both.
+
+    De novo's Oktoberfest run only depends on the database branch's ce_calibration/rt_model
+    (relinked below), so it's run right after the database branch's Oktoberfest step instead
+    of after that branch's Percolator + merge too -- nothing runs concurrently with either
+    Oktoberfest pass. Once both are done, independent steps across the two branches run
+    concurrently where the real data dependencies allow it: database's Percolator run
+    alongside de novo's column filtering, then database's merge alongside de novo's
+    Percolator + merge (de novo's Percolator only needs database's weights.csv, not its
+    merge).
 
     Args:
         config: Pipeline configuration.
@@ -374,7 +425,7 @@ def run(config: GrovemsConfig, outdir: Path) -> RescoringResult:
     rescoring_dir.mkdir(parents=True, exist_ok=True)
     num_threads = config.num_threads or os.cpu_count() or 1
 
-    # --- database branch ---
+    # --- database branch: Oktoberfest ---
     if config.database_oktoberfest_dir:
         database_dir = Path(config.database_oktoberfest_dir)
         logger.info("Reusing existing Oktoberfest database results: %s", database_dir)
@@ -389,51 +440,7 @@ def run(config: GrovemsConfig, outdir: Path) -> RescoringResult:
             num_threads=num_threads,
         )
 
-    database_percolator_dir = database_dir / "results" / "percolator"
-    database_rescore_tab = database_percolator_dir / "rescore.tab"
-    database_feature_columns = _drop_columns(
-        str(database_rescore_tab), str(database_rescore_tab), "\t", config.drop_columns_database.split()
-    )
-
-    database_weights = database_percolator_dir / "rescore.percolator.weights.csv"
-    database_psms = database_percolator_dir / "rescore.percolator.psms.txt"
-    database_decoy_psms = database_percolator_dir / "rescore.percolator.decoy.psms.txt"
-    _run_percolator(
-        config,
-        [
-            "--weights",
-            database_weights.name,
-            "--num-threads",
-            str(config.percolator_threads),
-            "--subset-max-train",
-            str(config.percolator_subset_max_train),
-            "--only-psms",
-            "--no-terminate",
-            "--verbose",
-            str(config.percolator_verbose),
-            "--post-processing-tdc",
-            "--testFDR",
-            str(config.percolator_test_fdr),
-            "--trainFDR",
-            str(config.percolator_train_fdr),
-            "--results-psms",
-            database_psms.name,
-            "--decoy-results-psms",
-            database_decoy_psms.name,
-            database_rescore_tab.name,
-        ],
-        cwd=database_percolator_dir,
-    )
-
-    database_merged_dir = _merge_and_partition_branch(
-        branch_dir=database_dir,
-        rescore_tab=database_rescore_tab,
-        percolator_psms=database_psms,
-        percolator_decoy_psms=database_decoy_psms,
-        keep_columns=DATABASE_COLUMNS,
-    )
-
-    # --- de novo branch (reuses database's ce_calibration/rt_model and weights) ---
+    # --- de novo branch: Oktoberfest (reuses database's ce_calibration/rt_model) ---
     if config.denovo_oktoberfest_dir:
         denovo_dir = Path(config.denovo_oktoberfest_dir)
         logger.info("Reusing existing Oktoberfest de novo results: %s", denovo_dir)
@@ -452,40 +459,107 @@ def run(config: GrovemsConfig, outdir: Path) -> RescoringResult:
             num_threads=num_threads,
         )
 
+    database_percolator_dir = database_dir / "results" / "percolator"
+    database_rescore_tab = database_percolator_dir / "rescore.tab"
+    database_weights = database_percolator_dir / "rescore.percolator.weights.csv"
+    database_psms = database_percolator_dir / "rescore.percolator.psms.txt"
+    database_decoy_psms = database_percolator_dir / "rescore.percolator.decoy.psms.txt"
+
     denovo_percolator_dir = denovo_dir / "results" / "percolator"
     denovo_rescore_tab = denovo_percolator_dir / "rescore.tab"
-    denovo_feature_columns = _drop_columns(
-        str(denovo_rescore_tab), str(denovo_rescore_tab), "\t", config.drop_columns_denovo.split()
-    )
+
+    def _drop_database_columns_and_run_percolator() -> list[str]:
+        database_feature_columns = _drop_columns(
+            str(database_rescore_tab), str(database_rescore_tab), "\t", config.drop_columns_database.split()
+        )
+        _run_percolator(
+            config,
+            [
+                "--weights",
+                database_weights.name,
+                "--num-threads",
+                str(config.percolator_threads),
+                "--subset-max-train",
+                str(config.percolator_subset_max_train),
+                "--only-psms",
+                "--no-terminate",
+                "--verbose",
+                str(config.percolator_verbose),
+                "--post-processing-tdc",
+                "--testFDR",
+                str(config.percolator_test_fdr),
+                "--trainFDR",
+                str(config.percolator_train_fdr),
+                "--results-psms",
+                database_psms.name,
+                "--decoy-results-psms",
+                database_decoy_psms.name,
+                database_rescore_tab.name,
+            ],
+            cwd=database_percolator_dir,
+        )
+        return database_feature_columns
+
+    def _drop_denovo_columns() -> list[str]:
+        return _drop_columns(str(denovo_rescore_tab), str(denovo_rescore_tab), "\t", config.drop_columns_denovo.split())
+
+    # Database's Percolator run only needs its own rescore.tab (already on disk); de novo's
+    # column filtering is on a different file and doesn't depend on database's Percolator at
+    # all -- run them concurrently instead of one after the other.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        database_columns_future = pool.submit(_drop_database_columns_and_run_percolator)
+        denovo_columns_future = pool.submit(_drop_denovo_columns)
+        database_feature_columns = database_columns_future.result()
+        denovo_feature_columns = denovo_columns_future.result()
+
     _require_matching_columns(database_feature_columns, denovo_feature_columns)
 
-    denovo_avg_weights = denovo_percolator_dir / "rescore.percolator.weights.avg.csv"
-    _parse_and_write_avg_weights(str(database_weights), str(denovo_avg_weights))
+    def _merge_database() -> Path:
+        return _merge_and_partition_branch(
+            branch_dir=database_dir,
+            rescore_tab=database_rescore_tab,
+            percolator_psms=database_psms,
+            percolator_decoy_psms=database_decoy_psms,
+            keep_columns=DATABASE_COLUMNS,
+        )
 
-    denovo_psms = denovo_percolator_dir / "rescore.percolator.psms.txt"
-    _run_percolator(
-        config,
-        [
-            "--init-weights",
-            denovo_avg_weights.name,
-            "--static",
-            "--num-threads",
-            str(config.percolator_threads),
-            "--only-psms",
-            "--no-terminate",
-            "--results-psms",
-            denovo_psms.name,
-            denovo_rescore_tab.name,
-        ],
-        cwd=denovo_percolator_dir,
-    )
+    def _run_denovo_percolator_and_merge() -> Path:
+        denovo_avg_weights = denovo_percolator_dir / "rescore.percolator.weights.avg.csv"
+        _parse_and_write_avg_weights(str(database_weights), str(denovo_avg_weights))
 
-    denovo_merged_dir = _merge_and_partition_branch(
-        branch_dir=denovo_dir,
-        rescore_tab=denovo_rescore_tab,
-        percolator_psms=denovo_psms,
-        percolator_decoy_psms=None,
-        keep_columns=DENOVO_COLUMNS,
-    )
+        denovo_psms = denovo_percolator_dir / "rescore.percolator.psms.txt"
+        _run_percolator(
+            config,
+            [
+                "--init-weights",
+                denovo_avg_weights.name,
+                "--static",
+                "--num-threads",
+                str(config.percolator_threads),
+                "--only-psms",
+                "--no-terminate",
+                "--results-psms",
+                denovo_psms.name,
+                denovo_rescore_tab.name,
+            ],
+            cwd=denovo_percolator_dir,
+        )
+        return _merge_and_partition_branch(
+            branch_dir=denovo_dir,
+            rescore_tab=denovo_rescore_tab,
+            percolator_psms=denovo_psms,
+            percolator_decoy_psms=None,
+            keep_columns=DENOVO_COLUMNS,
+        )
+
+    # Database's merge only needs its own Percolator output, already on disk at this point;
+    # de novo's Percolator only needs database's weights.csv, also already on disk -- neither
+    # depends on the other, so run database's merge concurrently with de novo's Percolator run
+    # instead of merge-then-percolator.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        database_merge_future = pool.submit(_merge_database)
+        denovo_future = pool.submit(_run_denovo_percolator_and_merge)
+        database_merged_dir = database_merge_future.result()
+        denovo_merged_dir = denovo_future.result()
 
     return RescoringResult(database_merged_dir=database_merged_dir, denovo_merged_dir=denovo_merged_dir)

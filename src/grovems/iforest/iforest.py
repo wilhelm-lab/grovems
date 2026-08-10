@@ -128,7 +128,10 @@ def score_grove_forest_file(merged_df: pd.DataFrame, model: SUOD, feature_cols: 
 
     Each ``_merge`` category (database_only/denovo_only/shared) is scored on its own
     suffixed feature columns -- shared rows use the database-side ones, the same
-    convention used elsewhere for shared PSMs.
+    convention used elsewhere for shared PSMs. ``ISO_scores`` here is still the raw
+    (unbounded) SUOD ``decision_function`` output, higher = more anomalous;
+    :func:`_rescale_iso_scores` rescales it to the final 0-1 (1=good, 0=bad) scale once
+    every file has been scored.
     """
     merged_df["ISO_labels"] = np.nan
     merged_df["ISO_scores"] = np.nan
@@ -146,11 +149,25 @@ def score_grove_forest_file(merged_df: pd.DataFrame, model: SUOD, feature_cols: 
         merged_df.loc[mask, "ISO_scores"] = model.decision_function(subset)
 
 
+def _rescale_iso_scores(files: list[Path], score_min: float, score_max: float) -> None:
+    """Min-max normalize ISO_scores to [0, 1] across every file, in place.
+
+    Inverted relative to the raw SUOD output so the final scale reads naturally:
+    ``1.0`` = least anomalous (good), ``0.0`` = most anomalous (bad).
+    """
+    spread = score_max - score_min
+    for path in files:
+        df = pd.read_parquet(path)
+        df["ISO_scores"] = 1.0 if spread <= 0 else 1.0 - (df["ISO_scores"] - score_min) / spread
+        df.to_parquet(path, index=False, engine="pyarrow")
+
+
 def run(grove_forest_dir: Path, feature_cols: list[str], model_dir: Path) -> None:
-    """Fit a SUOD model on grove_forest/*.parquet, then score and update those files in place."""
-    files = sorted(grove_forest_dir.glob("*.parquet"))
+    """Fit a SUOD model on grove_forest/results/*.parquet, then score and update those files in place."""
+    results_dir = grove_forest_dir / "results"
+    files = sorted(results_dir.glob("*.parquet"))
     if not files:
-        raise ValueError(f"No grove_forest parquet files found in {grove_forest_dir}")
+        raise ValueError(f"No grove_forest parquet files found in {results_dir}")
 
     logger.info("Gathering SUOD training candidates from %d file(s)", len(files))
     candidates = [select_training_candidates(pd.read_parquet(path)) for path in files]
@@ -166,7 +183,18 @@ def run(grove_forest_dir: Path, feature_cols: list[str], model_dir: Path) -> Non
     dump(model, model_dir / "SUOD_model.pkl")
 
     logger.info("Scoring and updating %d grove_forest file(s)", len(files))
+    score_min, score_max = np.inf, -np.inf
     for path in files:
         merged_df = pd.read_parquet(path)
         score_grove_forest_file(merged_df, model, feature_cols)
+        score_min = min(score_min, merged_df["ISO_scores"].min())
+        score_max = max(score_max, merged_df["ISO_scores"].max())
         merged_df.to_parquet(path, index=False, engine="pyarrow")
+
+    logger.info(
+        "Rescaling ISO_scores to [0, 1] (1=good, 0=bad) across %d file(s); raw range [%.6f, %.6f]",
+        len(files),
+        score_min,
+        score_max,
+    )
+    _rescale_iso_scores(files, score_min, score_max)

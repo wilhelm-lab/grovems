@@ -8,8 +8,6 @@
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
 
-set -euo pipefail
-
 #=== Configuration ===#
 PIPELINE_DIR="/cmnfs/proj/denovo_fdr/tools/grovems"
 CONFIG="${PIPELINE_DIR}/assets/default_config.yaml"
@@ -19,9 +17,14 @@ DENOVO_SEARCH_PATH="/cmnfs/proj/denovo_fdr/results/proteometools/results/search/
 RAWDATA_PATH="/cmnfs/proj/denovo_fdr/results/proteometools/raw/mzml"
 OUTDIR="/cmnfs/proj/denovo_fdr/results/proteometools/results/run.$(date +%d%m%Y).grovems.${SLURM_JOB_ID}"
 
-#=== Environment ===#
+#=== Environment -- edit to match how you installed grovems (see docs/notes/installation.rst) ===#
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate grovems
+
+# conda's own activate/deactivate hooks (e.g. deactivate-gxx_linux-64.sh, which backs up
+# CC/CXX env vars) aren't written to be `set -u` safe, so strict mode is only enabled
+# after conda activation completes, not before.
+set -euo pipefail
 
 #=== START ===#
 echo "=== Starting grovems at $(date) ==="

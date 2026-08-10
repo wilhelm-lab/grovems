@@ -204,14 +204,15 @@ def run(
     max_workers: Optional[int] = None,
     overwrite_outputs: bool = False,
 ) -> Path:
-    """Merge every raw file's database+de novo data, run PSA, write grove_forest/<raw>.parquet.
+    """Merge every raw file's database+de novo data, run PSA, write grove_forest/results/<raw>.parquet.
 
     Deletes ``database_merged_dir``/``denovo_merged_dir`` once done -- their data now
-    lives in ``grove_forest_dir``.
+    lives in ``grove_forest_dir/results``.
     """
     global PSA_MAX_WORKERS
     PSA_MAX_WORKERS = max_workers or os.cpu_count() or 1
-    grove_forest_dir.mkdir(parents=True, exist_ok=True)
+    results_dir = grove_forest_dir / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
 
     raw_files = sorted(
         {path.stem for path in database_merged_dir.glob("*.parquet")}
@@ -221,7 +222,7 @@ def run(
         raw_files = raw_files[:max_raw_files]
 
     for raw_file in tqdm(raw_files, desc="Merging + PSA"):
-        out_path = grove_forest_dir / f"{raw_file}.parquet"
+        out_path = results_dir / f"{raw_file}.parquet"
         if out_path.exists() and not overwrite_outputs:
             continue
         try:

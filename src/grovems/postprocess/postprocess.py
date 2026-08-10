@@ -1,24 +1,3 @@
-"""Post-IForest QC: empirical-CDF goodness + KS-divergence good/bad calls.
-
-Builds an empirical CDF of ``ISO_scores`` from the trusted shared PSMs (the same
-population IForest itself trains on -- see :func:`grovems.iforest.trusted_shared_mask`)
-and uses it two ways:
-
-1. **Goodness** -- every PSM in every ``grove_forest/*.parquet`` file gets a
-   ``TP_GOODNESS`` column: the fraction of the trusted-shared reference that is at
-   least as anomalous (``ISO_scores >=``) as this PSM. 1.0 means better than every
-   reference PSM, 0.0 means worse than all of them.
-2. **Divergence / good-bad calls** -- a two-sample Kolmogorov-Smirnov test compares
-   the reference distribution against ``database_only`` and against ``denovo_only``
-   ``ISO_scores``. Each comparison's point of maximum divergence
-   (``ks_2samp``'s ``statistic_location``) is that comparison's natural accept/reject
-   boundary; averaging the two locations gives one cutoff applied to both classes: a
-   PSM is ``GOOD`` if ``ISO_scores <= cutoff``, ``BAD`` otherwise.
-
-Reads/updates ``grove_forest_dir/*.parquet`` in place (adds ``TP_GOODNESS``) and
-writes ``grove_forest_dir/qc/ks_vs_tp.svg``, ``qc/ks_vs_tp_summary.csv``, and
-``qc/good_bad_database_only.csv`` / ``qc/good_bad_denovo_only.csv``.
-"""
 from __future__ import annotations
 
 import logging
@@ -38,6 +17,15 @@ logger = logging.getLogger(__name__)
 
 ID_COLUMNS = ["SpecId", "RAW_FILE", "SCAN_NUMBER"]
 OTHER_CLASSES = ("database_only", "denovo_only")
+DETECTION_LEVELS = {"shared": "shared", "database_only": "database", "denovo_only": "denovo"}
+DETECTION_LEVEL_ORDER = ("shared", "database", "denovo")
+DETECTION_LEVEL_LABELS = {"shared": "Shared", "database": "Database only", "denovo": "De novo only"}
+DETECTION_LEVEL_COLORS = {"shared": "#2a78d6", "database": "#eb6834", "denovo": "#1baf7a"}
+SCORE_COLUMNS = {
+    "SCORE_denovo": "CASANOVO_SCORE",
+    "SCORE_database": "DATABASE_SCORE",
+    "percolator_score_database": "PERCOLATOR_SCORE_DATABASE",
+}
 
 
 def _gather_reference_scores(files: list[Path]) -> np.ndarray:
@@ -50,9 +38,14 @@ def _gather_reference_scores(files: list[Path]) -> np.ndarray:
 
 
 def _goodness(reference_sorted: np.ndarray, scores: np.ndarray) -> np.ndarray:
-    """Fraction of the reference at least as anomalous (>=) as each of ``scores``."""
+    """Fraction of the reference at least as anomalous (<=) as each of ``scores``.
+
+    ``ISO_scores`` is on the 0-1 scale produced by ``iforest._rescale_iso_scores``
+    (1=good/least anomalous, 0=bad/most anomalous), so "at least as anomalous as x"
+    means a reference score <= x.
+    """
     n = len(reference_sorted)
-    return 1.0 - np.searchsorted(reference_sorted, scores, side="left") / n
+    return np.searchsorted(reference_sorted, scores, side="right") / n
 
 
 def _add_goodness_column(files: list[Path], reference_sorted: np.ndarray) -> dict[str, list[np.ndarray]]:
@@ -95,7 +88,7 @@ def _plot_ks_vs_tp(reference_scores: np.ndarray, other: dict[str, np.ndarray], c
         ax.plot(grid, ecdf_at(reference_sorted, grid), lw=1.8, label=f"trusted shared (n={len(reference_scores):,})")
         ax.plot(grid, ecdf_at(np.sort(scores), grid), lw=1.8, label=f"{name} (n={len(scores):,})")
         ax.axvline(cutoff, color="0.4", ls="--", lw=0.9, label=f"cutoff: ISO_scores={cutoff:.4f}")
-        ax.set_xlabel("ISO_scores (higher = more anomalous)")
+        ax.set_xlabel("ISO_scores (0-1 scale; 1 = good, 0 = bad)")
         ax.set_title(f"ECDF: trusted shared vs {name}")
         ax.legend(fontsize=8, loc="lower right")
     axes[0].set_ylabel("cumulative fraction (ECDF)")
@@ -104,27 +97,50 @@ def _plot_ks_vs_tp(reference_scores: np.ndarray, other: dict[str, np.ndarray], c
     plt.close(fig)
 
 
-def _write_good_bad_lists(files: list[Path], cutoff: float, out_dir: Path) -> None:
-    """Pass 3: narrow columns only, classify database_only/denovo_only PSMs, write two CSVs."""
-    columns = [*ID_COLUMNS, "_merge", "ISO_scores", "TP_GOODNESS"]
-    rows: dict[str, list[pd.DataFrame]] = {name: [] for name in OTHER_CLASSES}
-    for path in files:
-        df = pd.read_parquet(path, columns=columns)
-        for name in OTHER_CLASSES:
-            rows[name].append(df.loc[df["_merge"] == name])
+def _plot_detection_level_counts(counts: pd.Series, out_path: Path) -> None:
+    """Bar chart of PSM counts per detection level (shared / database-only / denovo-only)."""
+    values = [int(counts.get(level, 0)) for level in DETECTION_LEVEL_ORDER]
+    labels = [DETECTION_LEVEL_LABELS[level] for level in DETECTION_LEVEL_ORDER]
+    colors = [DETECTION_LEVEL_COLORS[level] for level in DETECTION_LEVEL_ORDER]
 
-    for name in OTHER_CLASSES:
-        combined = pd.concat(rows[name], ignore_index=True).drop(columns=["_merge"])
-        combined["CALL"] = np.where(combined["ISO_scores"] <= cutoff, "GOOD", "BAD")
-        combined = combined.sort_values("TP_GOODNESS", ascending=False).reset_index(drop=True)
-        combined.to_csv(out_dir / f"good_bad_{name}.csv", index=False)
+    fig, ax = plt.subplots(figsize=(5.5, 4.4))
+    bars = ax.bar(labels, values, color=colors, width=0.6)
+    ax.bar_label(bars, labels=[f"{v:,}" for v in values], padding=3)
+    ax.set_ylabel("PSM count")
+    ax.set_title("PSMs by detection level")
+    ax.margins(y=0.12)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close(fig)
+
+
+def _write_good_bad_lists(files: list[Path], cutoff: float, grove_forest_dir: Path, qc_dir: Path) -> None:
+    """Pass 3: classify every PSM, plot the detection-level split, write good.csv/bad.csv."""
+    columns = [*ID_COLUMNS, "_merge", "ISO_scores", "TP_GOODNESS", "AA_SCORE", *SCORE_COLUMNS]
+    parts = [pd.read_parquet(path, columns=columns) for path in files]
+
+    combined = pd.concat(parts, ignore_index=True)
+    combined["DETECTION_LEVEL"] = combined.pop("_merge").map(DETECTION_LEVELS)
+    combined["CASANOVO_AA_SCORE"] = combined.pop("AA_SCORE").str.replace("|", ",", regex=False)
+    combined = combined.rename(columns=SCORE_COLUMNS)
+    # ISO_scores is 0-1 (1=good, 0=bad); GOOD is now the >= side of the cutoff.
+    combined["CALL"] = np.where(combined["ISO_scores"] >= cutoff, "GOOD", "BAD")
+    combined = combined.sort_values("TP_GOODNESS", ascending=False).reset_index(drop=True)
+
+    _plot_detection_level_counts(combined["DETECTION_LEVEL"].value_counts(), qc_dir / "psm_overlap.svg")
+
+    for call, name in (("GOOD", "good"), ("BAD", "bad")):
+        subset = combined.loc[combined["CALL"] == call].drop(columns=["CALL"])
+        out_path = grove_forest_dir / f"{name}.csv"
+        subset.to_csv(out_path, index=False)
         logger.info(
-            "%s: %d GOOD, %d BAD (cutoff ISO_scores<=%.4f) -> %s",
+            "%s.csv: %d rows (cutoff ISO_scores>=%.4f for GOOD) -> %s",
             name,
-            (combined["CALL"] == "GOOD").sum(),
-            (combined["CALL"] == "BAD").sum(),
+            len(subset),
             cutoff,
-            out_dir / f"good_bad_{name}.csv",
+            out_path,
         )
 
 
@@ -132,16 +148,17 @@ def run(grove_forest_dir: Path) -> Path:
     """Add TP_GOODNESS to every grove_forest PSM and write KS-based good/bad calls.
 
     Args:
-        grove_forest_dir: Directory of IForest-scored ``grove_forest/*.parquet`` files
-            (must already have ``ISO_scores``/``ISO_labels`` columns from the IForest
-            stage).
+        grove_forest_dir: Directory of IForest-scored ``grove_forest/results/*.parquet``
+            files (must already have ``ISO_scores``/``ISO_labels`` columns from the
+            IForest stage).
 
     Returns:
         The ``grove_forest_dir/qc`` directory the outputs were written to.
     """
-    files = sorted(grove_forest_dir.glob("*.parquet"))
+    results_dir = grove_forest_dir / "results"
+    files = sorted(results_dir.glob("*.parquet"))
     if not files:
-        raise ValueError(f"No grove_forest parquet files found in {grove_forest_dir}")
+        raise ValueError(f"No grove_forest parquet files found in {results_dir}")
     if "ISO_scores" not in pd.read_parquet(files[0], columns=None).columns:
         raise ValueError(f"{files[0]} has no ISO_scores column -- run the IForest stage first")
 
@@ -159,14 +176,14 @@ def run(grove_forest_dir: Path) -> Path:
     divergence = {name: _ks_divergence(reference_sorted, scores) for name, scores in other_scores.items()}
     cutoff = float(np.mean([d["statistic_location"] for d in divergence.values()]))
     logger.info("KS divergence: %s", divergence)
-    logger.info("Good/bad cutoff (average of statistic_location): ISO_scores<=%.4f", cutoff)
+    logger.info("Good/bad cutoff (average of statistic_location): ISO_scores>=%.4f is GOOD", cutoff)
 
     summary_rows = [{"comparison": f"trusted_shared vs {name}", **stats} for name, stats in divergence.items()]
     summary_rows.append({"comparison": "average", "cutoff_iso_scores": cutoff})
     pd.DataFrame(summary_rows).to_csv(qc_dir / "ks_vs_tp_summary.csv", index=False)
 
     _plot_ks_vs_tp(reference_sorted, other_scores, cutoff, qc_dir / "ks_vs_tp.svg")
-    _write_good_bad_lists(files, cutoff, qc_dir)
+    _write_good_bad_lists(files, cutoff, grove_forest_dir, qc_dir)
 
     logger.info("Postprocess QC written to %s", qc_dir)
     return qc_dir
