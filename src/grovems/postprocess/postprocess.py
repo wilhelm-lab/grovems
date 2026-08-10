@@ -19,7 +19,7 @@ ID_COLUMNS = ["SpecId", "RAW_FILE", "SCAN_NUMBER"]
 OTHER_CLASSES = ("database_only", "denovo_only")
 DETECTION_LEVELS = {"shared": "shared", "database_only": "database", "denovo_only": "denovo"}
 DETECTION_LEVEL_ORDER = ("shared", "database", "denovo")
-DETECTION_LEVEL_LABELS = {"shared": "Shared", "database": "Database only", "denovo": "De novo only"}
+DETECTION_LEVEL_LABELS = {"shared": "Shared PSM", "database": "Database only", "denovo": "De novo only"}
 DETECTION_LEVEL_COLORS = {"shared": "#2a78d6", "database": "#eb6834", "denovo": "#1baf7a"}
 SCORE_COLUMNS = {
     "SCORE_denovo": "CASANOVO_SCORE",
@@ -112,6 +112,29 @@ def _plot_ks_vs_tp(reference_scores: np.ndarray, other: dict[str, np.ndarray], c
     plt.close(fig)
 
 
+def _psm_detection_level_counts(combined: pd.DataFrame) -> pd.Series:
+    """Count actual shared PSMs, not shared scans.
+
+    ``DETECTION_LEVEL`` only reflects whether a *scan* produced a hit from both search
+    engines. A shared scan where the two engines called different peptides is not a
+    shared PSM -- it's one database PSM and one de novo PSM that happen to share a
+    spectrum, uncorroborated by the other engine. ``sequence_match`` (identical modified
+    sequence + charge, from :func:`grovems.psa.psa_merge.add_sequence_match_columns`)
+    is what actually decides agreement, so split shared-but-conflicting scans into the
+    database/denovo buckets instead of counting them as shared.
+    """
+    shared_scan = combined["DETECTION_LEVEL"] == "shared"
+    agree = shared_scan & combined["sequence_match"]
+    conflicting = shared_scan & ~combined["sequence_match"]
+    return pd.Series(
+        {
+            "shared": int(agree.sum()),
+            "database": int(((combined["DETECTION_LEVEL"] == "database") | conflicting).sum()),
+            "denovo": int(((combined["DETECTION_LEVEL"] == "denovo") | conflicting).sum()),
+        }
+    )
+
+
 def _plot_detection_level_counts(counts: pd.Series, out_path: Path) -> None:
     """Bar chart of PSM counts per detection level (shared / database-only / denovo-only)."""
     values = [int(counts.get(level, 0)) for level in DETECTION_LEVEL_ORDER]
@@ -141,12 +164,15 @@ def _write_good_bad_lists(files: list[Path], cutoff: float, grove_forest_dir: Pa
         "AA_SCORE",
         "SEQUENCE_database",
         "SEQUENCE_denovo",
+        "sequence_match",
         *SCORE_COLUMNS,
     ]
     parts = [pd.read_parquet(path, columns=columns) for path in files]
 
     combined = pd.concat(parts, ignore_index=True)
     combined["DETECTION_LEVEL"] = combined.pop("_merge").map(DETECTION_LEVELS)
+    psm_counts = _psm_detection_level_counts(combined)
+    combined = combined.drop(columns=["sequence_match"])
     combined["CASANOVO_AA_SCORE"] = combined.pop("AA_SCORE").str.replace("|", ",", regex=False)
     combined["SEQUENCE"] = combined.pop("SEQUENCE_denovo").combine_first(combined.pop("SEQUENCE_database"))
     has_aa_score = combined["CASANOVO_AA_SCORE"].notna()
@@ -161,7 +187,7 @@ def _write_good_bad_lists(files: list[Path], cutoff: float, grove_forest_dir: Pa
     combined["CALL"] = np.where(combined["ISO_scores"] >= cutoff, "GOOD", "BAD")
     combined = combined.sort_values("TP_GOODNESS", ascending=False).reset_index(drop=True)
 
-    _plot_detection_level_counts(combined["DETECTION_LEVEL"].value_counts(), qc_dir / "psm_overlap.svg")
+    _plot_detection_level_counts(psm_counts, qc_dir / "psm_overlap.svg")
 
     for call, name in (("GOOD", "good"), ("BAD", "bad")):
         subset = combined.loc[combined["CALL"] == call].drop(columns=["CALL"])
