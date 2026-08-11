@@ -83,6 +83,21 @@ similarity assignment) -> isolation-forest (IForest/SUOD) scoring, for the de no
    (`PERCOLATOR_SCORE_DATABASE`), and, for rows with a de novo call, a comma-separated
    `CASANOVO_AA_SCORE` column of that call's per-residue Casanovo confidence scores.
 
+**`plotting/`** (`plotting.run()`, opt-in via `run_plotting: true` -- see below)
+8. Extra QC plots, written to `grove_forest/qc/` alongside the postprocess ones:
+   `shared_venn.svg` (shared scans vs shared PSM -- how much of the scan-level overlap
+   between the two engines is an actual agreeing identification vs just two different
+   calls on the same spectrum), `levenshtein_distribution.svg` (edit distance between
+   database and de novo sequence on shared PSMs, from `PSA_LEVENSHTEIN` -- one
+   distribution, since the distance is symmetric and only defined where both sequences
+   exist), `peptide_length_distribution.svg` (database vs de novo, all PSMs, no
+   filtering), and `perc_vs_iso_database.svg`/`perc_vs_iso_denovo.svg` (joint density of
+   `percolator_score_<side>` vs `ISO_scores_<side>`, each against that side's own
+   postprocess cutoff -- database split target/decoy, de novo single-layer since it has
+   no decoys). Reads straight from `grove_forest/results/*.parquet` and computes its own
+   cutoffs read-only, so it can run standalone against an already-scored `grove_forest_dir`
+   even if postprocess didn't run in the same invocation.
+
 ![Pipeline overview: FragPipe/Casanovo search results feed PSMs into Oktoberfest feature generation, then PSA similarity grading, then isolation-forest rescoring](docs/assets/full_pipeline.png)
 
 ## Quickstart
@@ -126,6 +141,7 @@ defaults, and comments. Notable ones:
 | Key | Default | Meaning |
 |---|---|---|
 | `run_rescoring` / `run_psa` / `run_iforest` / `run_postprocess` | `true` / `true` / `true` / `true` | enable/disable each stage. `run_psa` requires `run_rescoring` in the same invocation; `run_postprocess` needs `ISO_scores` (from `run_iforest`, this invocation or an existing `grove_forest_dir`). |
+| `run_plotting` | `false` | opt-in extra QC plots (Venn, Levenshtein, peptide length, percolator-vs-isolation-score); needs `ISO_scores_database`/`ISO_scores_denovo` (from `run_iforest`, this invocation or an existing `grove_forest_dir`) |
 | `database_oktoberfest_dir` / `denovo_oktoberfest_dir` | `null` / `null` | reuse an existing Oktoberfest output directory for that branch instead of running Oktoberfest (used in place); set one, both, or neither |
 | `drop_columns_database` | `lda_scores annotated_ions delta_mass_ppm log10_evalue next_score collision_energy_aligned` | columns dropped before training Percolator on the database pin |
 | `drop_columns_denovo` | `lda_scores collision_energy_aligned` | columns dropped before scoring the de novo pin |

@@ -8,6 +8,9 @@ run_rescoring: true
 run_psa: true
 run_iforest: true
 run_postprocess: true
+# Extra QC plots (shared-scan/PSM Venn, Levenshtein distance, peptide length,
+# percolator-vs-isolation-score) -- opt-in, not part of the standard pipeline.
+run_plotting: false
 
 outdir: results
 

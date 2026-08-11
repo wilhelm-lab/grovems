@@ -130,8 +130,8 @@ def _run_psa_pair(sequence1, sequence2):
         _WORKER_PSA.set_sequences(str(sequence1), str(sequence2))
         _WORKER_PSA.classify()
     except Exception as exc:
-        return ("PSA_ERROR", np.nan, f"{type(exc).__name__}: {exc}")
-    return (_WORKER_PSA.result.label, _WORKER_PSA.result.similarity, None)
+        return ("PSA_ERROR", np.nan, np.nan, f"{type(exc).__name__}: {exc}")
+    return (_WORKER_PSA.result.label, _WORKER_PSA.result.similarity, _WORKER_PSA.result.levenshtein_distance, None)
 
 
 def _choose_chunksize(total_items: int, n_workers: int) -> int:
@@ -151,7 +151,9 @@ def _run_psa_for_pairs(sequences_database: pd.Series, sequences_denovo: pd.Serie
                 desc="Running PSA",
             )
         )
-    return pd.DataFrame(rows, columns=["PSA", "PSA_SIMILARITY", "PSA_ERROR"], index=sequences_database.index)
+    return pd.DataFrame(
+        rows, columns=["PSA", "PSA_SIMILARITY", "PSA_LEVENSHTEIN", "PSA_ERROR"], index=sequences_database.index
+    )
 
 
 def _add_psa_columns(merged_scan: pd.DataFrame) -> None:
@@ -168,6 +170,7 @@ def _add_psa_columns(merged_scan: pd.DataFrame) -> None:
 
     merged_scan["PSA"] = None
     merged_scan["PSA_SIMILARITY"] = np.nan
+    merged_scan["PSA_LEVENSHTEIN"] = np.nan
     merged_scan["PSA_ERROR"] = None
 
     shared_mask = (
@@ -178,6 +181,7 @@ def _add_psa_columns(merged_scan: pd.DataFrame) -> None:
 
     merged_scan.loc[same_sequence_mask, "PSA"] = "PSA - Tier 0 - IDENTICAL"
     merged_scan.loc[same_sequence_mask, "PSA_SIMILARITY"] = 1.0
+    merged_scan.loc[same_sequence_mask, "PSA_LEVENSHTEIN"] = 0
 
     if different_sequence_mask.any():
         scored = _run_psa_for_pairs(
@@ -186,6 +190,7 @@ def _add_psa_columns(merged_scan: pd.DataFrame) -> None:
         )
         merged_scan.loc[different_sequence_mask, "PSA"] = scored["PSA"]
         merged_scan.loc[different_sequence_mask, "PSA_SIMILARITY"] = scored["PSA_SIMILARITY"]
+        merged_scan.loc[different_sequence_mask, "PSA_LEVENSHTEIN"] = scored["PSA_LEVENSHTEIN"]
         merged_scan.loc[different_sequence_mask, "PSA_ERROR"] = scored["PSA_ERROR"]
 
 

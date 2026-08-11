@@ -98,6 +98,37 @@ def _add_goodness_column(files: list[Path], reference_sorted: dict[str, np.ndarr
     return {name: np.concatenate(parts) for name, parts in other_scores.items()}
 
 
+def _gather_only_scores(files: list[Path]) -> dict[str, np.ndarray]:
+    """Each ``*_only`` class's own-side ISO_scores, read-only (no TP_GOODNESS side effect).
+
+    Same population :func:`_add_goodness_column` collects for the KS test, but without
+    that function's write pass -- for callers (e.g. ``grovems.plotting``) that just want
+    the cutoffs, not to re-run postprocess's TP_GOODNESS write.
+    """
+    other_scores: dict[str, list[np.ndarray]] = {only_name: [] for only_name in SIDE_ONLY_MERGE.values()}
+    for path in files:
+        columns = ["_merge", *(f"ISO_scores_{side}" for side in SIDES)]
+        df = pd.read_parquet(path, columns=columns)
+        for side, only_name in SIDE_ONLY_MERGE.items():
+            other_scores[only_name].append(df.loc[df["_merge"] == only_name, f"ISO_scores_{side}"].to_numpy())
+    return {name: np.concatenate(parts) for name, parts in other_scores.items()}
+
+
+def compute_cutoffs(files: list[Path]) -> dict[str, float]:
+    """Per-side GOOD/BAD cutoff, read-only: each side's own KS-divergence point (trusted-
+    shared reference vs that side's uncorroborated population), never averaged across
+    sides. Lets ``grovems.plotting`` reuse the same cutoffs ``run()`` computes without
+    re-running the full postprocess stage (and its TP_GOODNESS write).
+    """
+    reference_sorted = _gather_reference_scores(files)
+    other_scores = _gather_only_scores(files)
+    divergence = {
+        only_name: _ks_divergence(reference_sorted[side], other_scores[only_name])
+        for side, only_name in SIDE_ONLY_MERGE.items()
+    }
+    return {side: float(divergence[only_name]["statistic_location"]) for side, only_name in SIDE_ONLY_MERGE.items()}
+
+
 def _ks_divergence(reference_scores: np.ndarray, other_scores: np.ndarray) -> dict:
     result = ks_2samp(reference_scores, other_scores, alternative="two-sided")
     return {

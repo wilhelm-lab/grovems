@@ -23,6 +23,9 @@ class GrovemsConfig:
     run_psa: bool = True
     run_iforest: bool = True
     run_postprocess: bool = True
+    # Extra QC plots (shared-scan/PSM Venn, Levenshtein distance, peptide length,
+    # percolator-vs-isolation-score) -- opt-in, not part of the standard pipeline.
+    run_plotting: bool = True
 
     outdir: str = "results"
 

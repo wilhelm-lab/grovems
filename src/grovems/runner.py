@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 from grovems import iforest as ifr
+from grovems import plotting as plot
 from grovems import postprocess as pp
 from grovems import psa
 from grovems import rescoring as rs
@@ -64,11 +65,20 @@ def run(config: GrovemsConfig) -> None:
         ifr.run(grove_forest_dir, config.iforest_features, grove_forest_dir / "model")
         ran_iforest = True
 
+    ran_postprocess = False
     if config.run_postprocess:
         if not ran_iforest:
             _require(config, "grove_forest_dir")
             grove_forest_dir = Path(config.grove_forest_dir)
         logger.info("Running postprocess (ECDF/KS) stage")
         pp.run(grove_forest_dir)
+        ran_postprocess = True
+
+    if config.run_plotting:
+        if not (ran_iforest or ran_postprocess):
+            _require(config, "grove_forest_dir")
+            grove_forest_dir = Path(config.grove_forest_dir)
+        logger.info("Running plotting stage")
+        plot.run(grove_forest_dir)
 
     logger.info("Done.")
