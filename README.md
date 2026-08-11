@@ -41,32 +41,47 @@ similarity assignment) -> isolation-forest (IForest/SUOD) scoring, for the de no
    high-confidence shared-PSM training candidates from every file (without holding
    each file's full data at once) to fit a SUOD ensemble of isolation forests, saved to
    `grove_forest/model/SUOD_model.pkl`; pass 2 scores **every** row of every file
-   (database-only, de novo-only, *and* shared -- none are dropped) and overwrites that
-   file with `ISO_labels`/`ISO_scores` columns added. A final pass min-max normalizes
-   `ISO_scores` to `[0, 1]` across every file, inverted so `1.0` = good/least anomalous
-   and `0.0` = bad/most anomalous. End state: every `grove_forest/results/<raw_file>.parquet`
-   carries feature, PSA, and IForest columns together, updated in place at each stage.
+   (database-only, de novo-only, *and* shared -- none are dropped). Each side
+   (database, de novo) is scored independently on its own feature vector wherever that
+   side has an identification at all, so `shared` rows -- a scan with a hit from both
+   engines, not necessarily the same peptide -- get both an `ISO_scores_database` and an
+   `ISO_scores_denovo`. The legacy single-value `ISO_scores`/`ISO_labels` columns are
+   kept too, for existing consumers: database-side for database-only/shared rows,
+   de novo-side for de novo-only rows, with `ISO_scores_side` recording which of the two
+   independent columns that legacy value mirrors. A final pass min-max normalizes every
+   `ISO_scores*` column to `[0, 1]` across every file (shared min/max, so all three stay
+   comparable), inverted so `1.0` = good/least anomalous and `0.0` = bad/most anomalous.
+   End state: every `grove_forest/results/<raw_file>.parquet` carries feature, PSA, and
+   IForest columns together, updated in place at each stage.
 
 **`postprocess/`** (`postprocess.run()`)
-7. Builds an empirical CDF of `ISO_scores` from the trusted shared PSMs -- the same
+7. Builds two empirical CDFs from the trusted shared PSMs -- the same
    `_merge == "shared"`/target/positive-database-score population IForest itself trains
-   on (`iforest.trusted_shared_mask`) -- then adds a `TP_GOODNESS` column to every PSM in
-   every `grove_forest/results/*.parquet` file: the fraction of that reference at least
-   as anomalous as this PSM (1.0 = better than every reference PSM, 0.0 = worse than all
-   of them). Separately, a two-sample Kolmogorov-Smirnov test compares the reference
-   distribution against `database_only` and against `denovo_only` `ISO_scores`; each
-   comparison's point of maximum divergence (`ks_2samp`'s `statistic_location`) is that
-   comparison's natural accept/reject boundary, and averaging the two locations gives one
-   cutoff used to label every PSM (shared included) `GOOD` (`ISO_scores >= cutoff`) or
-   `BAD`. Writes `grove_forest/qc/ks_vs_tp.svg`, `qc/ks_vs_tp_summary.csv` (D, p-value,
-   location per comparison, plus the averaged cutoff), and `qc/psm_overlap.svg` (a bar
-   chart of PSM counts per `DETECTION_LEVEL`: `shared`/`database`/`denovo`). The
-   classified PSMs themselves are split by call into `grove_forest/good.csv` and
-   `grove_forest/bad.csv`, each with a `DETECTION_LEVEL` column and, per PSM, its
-   Casanovo score (`CASANOVO_SCORE`), database search score (`DATABASE_SCORE`),
-   database Percolator score (`PERCOLATOR_SCORE_DATABASE`), and, for rows with a de novo
-   call, a comma-separated `CASANOVO_AA_SCORE` column of that call's per-residue
-   Casanovo confidence scores.
+   on (`iforest.trusted_shared_mask`) -- one from their `ISO_scores_database` and one
+   from their `ISO_scores_denovo`, since `shared` rows are scored independently on both
+   sides. Adds `TP_GOODNESS_database`/`TP_GOODNESS_denovo` to every PSM in every
+   `grove_forest/results/*.parquet` file: the fraction of that side's reference at least
+   as anomalous as this PSM's score on that side (1.0 = better than every reference PSM,
+   0.0 = worse than all of them). Separately, a two-sample Kolmogorov-Smirnov test
+   compares each side's reference distribution against that side's own uncorroborated
+   population (`ISO_scores_database` reference vs `database_only`, `ISO_scores_denovo`
+   reference vs `denovo_only`); each comparison's point of maximum divergence
+   (`ks_2samp`'s `statistic_location`) is that side's own accept/reject cutoff -- the two
+   cutoffs are kept separate, not averaged, since the two sides were scored on different
+   feature vectors. Every PSM gets a `CALL_database`/`CALL_denovo` (`GOOD` if
+   `ISO_scores_<side> >= cutoff_<side>`, else `BAD`, null where that side has no
+   identification), plus legacy single-value `ISO_scores`/`TP_GOODNESS`/`CALL` columns
+   for whichever side is that row's primary identification (`ISO_scores_side`:
+   database-side for database-only/shared rows, denovo-side for denovo-only rows).
+   Writes `grove_forest/qc/ks_vs_tp.svg` (one ECDF panel per side), `qc/ks_vs_tp_summary.csv`
+   (D, p-value, location per comparison, plus both cutoffs), and `qc/psm_overlap.svg` (a
+   bar chart of PSM counts per `DETECTION_LEVEL`: `shared`/`database`/`denovo`). The
+   classified PSMs themselves are split by the legacy `CALL` into `grove_forest/good.csv`
+   and `grove_forest/bad.csv`, each carrying both sides' scores/goodness/calls, a
+   `DETECTION_LEVEL` column, and, per PSM, its Casanovo score (`CASANOVO_SCORE`),
+   database search score (`DATABASE_SCORE`), database Percolator score
+   (`PERCOLATOR_SCORE_DATABASE`), and, for rows with a de novo call, a comma-separated
+   `CASANOVO_AA_SCORE` column of that call's per-residue Casanovo confidence scores.
 
 ![Pipeline overview: FragPipe/Casanovo search results feed PSMs into Oktoberfest feature generation, then PSA similarity grading, then isolation-forest rescoring](docs/assets/full_pipeline.png)
 

@@ -12,7 +12,19 @@ from pyod.models.suod import SUOD
 
 logger = logging.getLogger(__name__)
 
-_MERGE_CATEGORIES = (("database_only", "database"), ("denovo_only", "denovo"), ("shared", "database"))
+# Merge categories that carry each side's own identification -- "shared" rows have
+# both (a scan with a hit from both engines, not necessarily the same peptide), so
+# they get scored independently on each side (see score_grove_forest_file).
+_SIDE_MERGE_VALUES = {
+    "database": ("database_only", "shared"),
+    "denovo": ("denovo_only", "shared"),
+}
+
+# Which independent per-side score backs the legacy single-value ISO_scores/ISO_labels
+# columns, kept for existing consumers (grovems.postprocess): database-side for
+# database_only/shared, denovo-side for denovo_only -- the same selection the old
+# single-score _MERGE_CATEGORIES made before both sides were scored independently.
+_LEGACY_SCORE_SIDE = {"database_only": "database", "denovo_only": "denovo", "shared": "database"}
 
 
 def select_suffixed_search_columns(
@@ -124,41 +136,66 @@ def build_suod_model(train_row_count: int) -> SUOD:
 
 
 def score_grove_forest_file(merged_df: pd.DataFrame, model: SUOD, feature_cols: list[str]) -> None:
-    """Add ISO_labels/ISO_scores columns to ``merged_df`` in place, for every row.
+    """Add per-side and legacy ISO_labels/ISO_scores columns to ``merged_df`` in place.
 
-    Each ``_merge`` category (database_only/denovo_only/shared) is scored on its own
-    suffixed feature columns -- shared rows use the database-side ones, the same
-    convention used elsewhere for shared PSMs. ``ISO_scores`` here is still the raw
-    (unbounded) SUOD ``decision_function`` output, higher = more anomalous;
-    :func:`_rescale_iso_scores` rescales it to the final 0-1 (1=good, 0=bad) scale once
-    every file has been scored.
+    Each side (database, denovo) is scored independently on its own suffixed feature
+    columns, wherever that side has an identification at all: database_only/shared for
+    the database side, denovo_only/shared for the denovo side. ``shared`` rows -- a scan
+    with a hit from both engines, not necessarily the same peptide -- therefore get both
+    an ``ISO_scores_database`` and an ``ISO_scores_denovo``, each scored from that row's
+    own feature vector for that side.
+
+    ``ISO_scores``/``ISO_labels`` remain the legacy single-value view existing
+    consumers (``grovems.postprocess``) read: for every row, the same side the old
+    single-score ``_MERGE_CATEGORIES`` picked (database-side for database_only/shared,
+    denovo-side for denovo_only). ``ISO_scores_side`` records which of the two
+    independent columns that legacy value came from.
+
+    ``ISO_scores*`` here are still the raw (unbounded) SUOD ``decision_function``
+    output, higher = more anomalous; :func:`_rescale_iso_scores` rescales every score
+    column to the final 0-1 (1=good, 0=bad) scale once every file has been scored.
     """
-    merged_df["ISO_labels"] = np.nan
-    merged_df["ISO_scores"] = np.nan
-    for merge_value, suffix_source in _MERGE_CATEGORIES:
-        mask = merged_df["_merge"] == merge_value
+    for side in ("database", "denovo"):
+        merged_df[f"ISO_labels_{side}"] = np.nan
+        merged_df[f"ISO_scores_{side}"] = np.nan
+        mask = merged_df["_merge"].isin(_SIDE_MERGE_VALUES[side])
         if not mask.any():
             continue
-        suffixed_cols = [f"{col}_{suffix_source}" for col in feature_cols]
+        suffixed_cols = [f"{col}_{side}" for col in feature_cols]
         missing = [col for col in suffixed_cols if col not in merged_df.columns]
         if missing:
-            raise KeyError(f"Missing feature columns for {merge_value}: {missing}")
+            raise KeyError(f"Missing feature columns for {side}: {missing}")
         subset = merged_df.loc[mask, suffixed_cols]
         subset.columns = feature_cols
-        merged_df.loc[mask, "ISO_labels"] = model.predict(subset)
-        merged_df.loc[mask, "ISO_scores"] = model.decision_function(subset)
+        merged_df.loc[mask, f"ISO_labels_{side}"] = model.predict(subset)
+        merged_df.loc[mask, f"ISO_scores_{side}"] = model.decision_function(subset)
+
+    merged_df["ISO_scores_side"] = merged_df["_merge"].map(_LEGACY_SCORE_SIDE)
+    is_denovo_side = merged_df["ISO_scores_side"].eq("denovo")
+    merged_df["ISO_scores"] = np.where(is_denovo_side, merged_df["ISO_scores_denovo"], merged_df["ISO_scores_database"])
+    merged_df["ISO_labels"] = np.where(is_denovo_side, merged_df["ISO_labels_denovo"], merged_df["ISO_labels_database"])
+
+
+def _rescale_series(series: pd.Series, score_min: float, score_max: float) -> pd.Series:
+    spread = score_max - score_min
+    if spread <= 0:
+        return series.where(series.isna(), 1.0)
+    return 1.0 - (series - score_min) / spread
 
 
 def _rescale_iso_scores(files: list[Path], score_min: float, score_max: float) -> None:
-    """Min-max normalize ISO_scores to [0, 1] across every file, in place.
+    """Min-max normalize every ISO_scores* column to [0, 1] across every file, in place.
 
     Inverted relative to the raw SUOD output so the final scale reads naturally:
     ``1.0`` = least anomalous (good), ``0.0`` = most anomalous (bad).
+    ``ISO_scores_database``/``ISO_scores_denovo`` share the legacy ``ISO_scores``
+    column's ``score_min``/``score_max`` so all three stay on one comparable scale;
+    rows missing a side (e.g. ``ISO_scores_denovo`` on a database_only row) stay null.
     """
-    spread = score_max - score_min
     for path in files:
         df = pd.read_parquet(path)
-        df["ISO_scores"] = 1.0 if spread <= 0 else 1.0 - (df["ISO_scores"] - score_min) / spread
+        for column in ("ISO_scores", "ISO_scores_database", "ISO_scores_denovo"):
+            df[column] = _rescale_series(df[column], score_min, score_max)
         df.to_parquet(path, index=False, engine="pyarrow")
 
 
@@ -187,8 +224,9 @@ def run(grove_forest_dir: Path, feature_cols: list[str], model_dir: Path) -> Non
     for path in files:
         merged_df = pd.read_parquet(path)
         score_grove_forest_file(merged_df, model, feature_cols)
-        score_min = min(score_min, merged_df["ISO_scores"].min())
-        score_max = max(score_max, merged_df["ISO_scores"].max())
+        combined_scores = pd.concat([merged_df["ISO_scores_database"], merged_df["ISO_scores_denovo"]]).dropna()
+        score_min = min(score_min, combined_scores.min())
+        score_max = max(score_max, combined_scores.max())
         merged_df.to_parquet(path, index=False, engine="pyarrow")
 
     logger.info(

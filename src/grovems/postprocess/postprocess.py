@@ -16,7 +16,11 @@ from ..iforest import trusted_shared_mask
 logger = logging.getLogger(__name__)
 
 ID_COLUMNS = ["SpecId", "RAW_FILE", "SCAN_NUMBER"]
-OTHER_CLASSES = ("database_only", "denovo_only")
+SIDES = ("database", "denovo")
+# Each side's own uncorroborated-hit population, compared against that side's own
+# trusted-shared reference -- keeps the two KS tests (and the two cutoffs they produce)
+# from being blended across sides that were scored on different feature vectors.
+SIDE_ONLY_MERGE = {"database": "database_only", "denovo": "denovo_only"}
 DETECTION_LEVELS = {"shared": "shared", "database_only": "database", "denovo_only": "denovo"}
 DETECTION_LEVEL_ORDER = ("shared", "database", "denovo")
 DETECTION_LEVEL_LABELS = {"shared": "Shared PSM", "database": "Database only", "denovo": "De novo only"}
@@ -43,36 +47,55 @@ def _lowercase_low_confidence_aa(sequence: str, aa_scores: str, threshold: float
     return "".join(aa.lower() if float(score) < threshold else aa for aa, score in zip(sequence, scores))
 
 
-def _gather_reference_scores(files: list[Path]) -> np.ndarray:
-    """Pass 1: sorted ISO_scores of the trusted-shared PSMs across every file (small)."""
-    reference = []
+def _gather_reference_scores(files: list[Path]) -> dict[str, np.ndarray]:
+    """Pass 1: sorted per-side ISO_scores of the trusted-shared PSMs across every file (small).
+
+    ``shared`` rows get scored on both sides independently (see
+    ``iforest.score_grove_forest_file``), so the trusted-shared population yields a
+    separate reference distribution per side: the database side's own reference
+    (used to judge ``database_only`` rows) and the denovo side's own reference (used
+    to judge ``denovo_only`` rows) -- comparing a side's scores against a reference
+    computed on the *other* side's features would mix two different scorings.
+    """
+    reference: dict[str, list[pd.Series]] = {side: [] for side in SIDES}
     for path in files:
-        df = pd.read_parquet(path, columns=["_merge", "Label_database", "percolator_score_database", "ISO_scores"])
-        reference.append(df.loc[trusted_shared_mask(df), "ISO_scores"])
-    return np.sort(pd.concat(reference, ignore_index=True).to_numpy())
+        columns = ["_merge", "Label_database", "percolator_score_database", *(f"ISO_scores_{side}" for side in SIDES)]
+        df = pd.read_parquet(path, columns=columns)
+        trusted = df.loc[trusted_shared_mask(df)]
+        for side in SIDES:
+            reference[side].append(trusted[f"ISO_scores_{side}"].dropna())
+    return {side: np.sort(pd.concat(parts, ignore_index=True).to_numpy()) for side, parts in reference.items()}
 
 
 def _goodness(reference_sorted: np.ndarray, scores: np.ndarray) -> np.ndarray:
-    """Fraction of the reference at least as anomalous (<=) as each of ``scores``.
+    """Fraction of the reference at least as anomalous (<=) as each of ``scores``; NaN scores stay NaN.
 
-    ``ISO_scores`` is on the 0-1 scale produced by ``iforest._rescale_iso_scores``
+    ``ISO_scores*`` is on the 0-1 scale produced by ``iforest._rescale_iso_scores``
     (1=good/least anomalous, 0=bad/most anomalous), so "at least as anomalous as x"
     means a reference score <= x.
     """
     n = len(reference_sorted)
-    return np.searchsorted(reference_sorted, scores, side="right") / n
+    filled = np.nan_to_num(scores, nan=-np.inf)
+    result = np.searchsorted(reference_sorted, filled, side="right") / n
+    return np.where(np.isnan(scores), np.nan, result)
 
 
-def _add_goodness_column(files: list[Path], reference_sorted: np.ndarray) -> dict[str, list[np.ndarray]]:
-    """Pass 2: add TP_GOODNESS to every file in place; collect ISO_scores for the KS test."""
-    other_scores: dict[str, list[np.ndarray]] = {name: [] for name in OTHER_CLASSES}
+def _add_goodness_column(files: list[Path], reference_sorted: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Pass 2: add per-side TP_GOODNESS_<side> to every file in place.
+
+    Also collects each ``*_only`` class's own-side ISO_scores for the KS test (e.g.
+    ``denovo_only`` rows contribute their ``ISO_scores_denovo``, not a database-side
+    value they don't have).
+    """
+    other_scores: dict[str, list[np.ndarray]] = {only_name: [] for only_name in SIDE_ONLY_MERGE.values()}
     for path in files:
         df = pd.read_parquet(path)
-        df["TP_GOODNESS"] = _goodness(reference_sorted, df["ISO_scores"].to_numpy())
+        for side in SIDES:
+            df[f"TP_GOODNESS_{side}"] = _goodness(reference_sorted[side], df[f"ISO_scores_{side}"].to_numpy())
         df.to_parquet(path, index=False, engine="pyarrow")
-        for name in OTHER_CLASSES:
-            other_scores[name].append(df.loc[df["_merge"] == name, "ISO_scores"].to_numpy())
-    return other_scores
+        for side, only_name in SIDE_ONLY_MERGE.items():
+            other_scores[only_name].append(df.loc[df["_merge"] == only_name, f"ISO_scores_{side}"].to_numpy())
+    return {name: np.concatenate(parts) for name, parts in other_scores.items()}
 
 
 def _ks_divergence(reference_scores: np.ndarray, other_scores: np.ndarray) -> dict:
@@ -86,24 +109,28 @@ def _ks_divergence(reference_scores: np.ndarray, other_scores: np.ndarray) -> di
     }
 
 
-def _plot_ks_vs_tp(reference_scores: np.ndarray, other: dict[str, np.ndarray], cutoff: float, out_path: Path) -> None:
-    grid = np.linspace(
-        min(reference_scores.min(), *(scores.min() for scores in other.values())),
-        max(reference_scores.max(), *(scores.max() for scores in other.values())),
-        501,
-    )
-    reference_sorted = np.sort(reference_scores)
+def _plot_ks_vs_tp(
+    reference_scores: dict[str, np.ndarray], other: dict[str, np.ndarray], cutoff: dict[str, float], out_path: Path
+) -> None:
+    """One ECDF panel per side, each against its own side-matched reference and cutoff."""
+    pairs = list(SIDE_ONLY_MERGE.items())
+    all_values = [reference_scores[side] for side, _ in pairs] + [other[name] for _, name in pairs]
+    grid = np.linspace(min(v.min() for v in all_values), max(v.max() for v in all_values), 501)
 
     def ecdf_at(sample_sorted: np.ndarray, x: np.ndarray) -> np.ndarray:
         return np.searchsorted(sample_sorted, x, side="right") / len(sample_sorted)
 
-    fig, axes = plt.subplots(1, len(other), figsize=(5.5 * len(other), 4.6), sharey=True)
+    fig, axes = plt.subplots(1, len(pairs), figsize=(5.5 * len(pairs), 4.6), sharey=True)
     axes = np.atleast_1d(axes)
-    for ax, (name, scores) in zip(axes, other.items()):
-        ax.plot(grid, ecdf_at(reference_sorted, grid), lw=1.8, label=f"trusted shared (n={len(reference_scores):,})")
+    for ax, (side, name) in zip(axes, pairs):
+        reference_sorted = reference_scores[side]
+        scores = other[name]
+        ax.plot(
+            grid, ecdf_at(reference_sorted, grid), lw=1.8, label=f"trusted shared, {side} (n={len(reference_sorted):,})"
+        )
         ax.plot(grid, ecdf_at(np.sort(scores), grid), lw=1.8, label=f"{name} (n={len(scores):,})")
-        ax.axvline(cutoff, color="0.4", ls="--", lw=0.9, label=f"cutoff: ISO_scores={cutoff:.4f}")
-        ax.set_xlabel("ISO_scores (0-1 scale; 1 = good, 0 = bad)")
+        ax.axvline(cutoff[side], color="0.4", ls="--", lw=0.9, label=f"cutoff: ISO_scores_{side}={cutoff[side]:.4f}")
+        ax.set_xlabel(f"ISO_scores_{side} (0-1 scale; 1 = good, 0 = bad)")
         ax.set_title(f"ECDF: trusted shared vs {name}")
         ax.legend(fontsize=8, loc="lower right")
     axes[0].set_ylabel("cumulative fraction (ECDF)")
@@ -154,13 +181,14 @@ def _plot_detection_level_counts(counts: pd.Series, out_path: Path) -> None:
     plt.close(fig)
 
 
-def _write_good_bad_lists(files: list[Path], cutoff: float, grove_forest_dir: Path, qc_dir: Path) -> None:
-    """Pass 3: classify every PSM, plot the detection-level split, write good.csv/bad.csv."""
+def _write_good_bad_lists(files: list[Path], cutoff: dict[str, float], grove_forest_dir: Path, qc_dir: Path) -> None:
+    """Pass 3: classify every PSM per side, plot the detection-level split, write good.csv/bad.csv."""
     columns = [
         *ID_COLUMNS,
         "_merge",
-        "ISO_scores",
-        "TP_GOODNESS",
+        "ISO_scores_side",
+        *(f"ISO_scores_{side}" for side in SIDES),
+        *(f"TP_GOODNESS_{side}" for side in SIDES),
         "AA_SCORE",
         "SEQUENCE_database",
         "SEQUENCE_denovo",
@@ -183,8 +211,21 @@ def _write_good_bad_lists(files: list[Path], cutoff: float, grove_forest_dir: Pa
         )
     ]
     combined = combined.rename(columns=SCORE_COLUMNS)
-    # ISO_scores is 0-1 (1=good, 0=bad); GOOD is now the >= side of the cutoff.
-    combined["CALL"] = np.where(combined["ISO_scores"] >= cutoff, "GOOD", "BAD")
+
+    # Each side is called GOOD/BAD against its own side-matched KS cutoff -- averaging
+    # the two cutoffs into one blended number (the old behavior) would compare a side's
+    # scores against a boundary calibrated partly from the other side's distribution.
+    for side in SIDES:
+        scores = combined[f"ISO_scores_{side}"]
+        combined[f"CALL_{side}"] = np.where(scores.notna(), np.where(scores >= cutoff[side], "GOOD", "BAD"), None)
+
+    # Legacy single-value view: whichever side is this row's primary identification
+    # (ISO_scores_side, from the IForest stage), now compared against that side's own
+    # cutoff instead of the old blended average.
+    is_denovo_side = combined["ISO_scores_side"].eq("denovo")
+    combined["ISO_scores"] = np.where(is_denovo_side, combined["ISO_scores_denovo"], combined["ISO_scores_database"])
+    combined["TP_GOODNESS"] = np.where(is_denovo_side, combined["TP_GOODNESS_denovo"], combined["TP_GOODNESS_database"])
+    combined["CALL"] = np.where(is_denovo_side, combined["CALL_denovo"], combined["CALL_database"])
     combined = combined.sort_values("TP_GOODNESS", ascending=False).reset_index(drop=True)
 
     _plot_detection_level_counts(psm_counts, qc_dir / "psm_overlap.svg")
@@ -194,21 +235,22 @@ def _write_good_bad_lists(files: list[Path], cutoff: float, grove_forest_dir: Pa
         out_path = grove_forest_dir / f"{name}.csv"
         subset.to_csv(out_path, index=False)
         logger.info(
-            "%s.csv: %d rows (cutoff ISO_scores>=%.4f for GOOD) -> %s",
+            "%s.csv: %d rows (cutoffs: database>=%.4f, denovo>=%.4f for GOOD) -> %s",
             name,
             len(subset),
-            cutoff,
+            cutoff["database"],
+            cutoff["denovo"],
             out_path,
         )
 
 
 def run(grove_forest_dir: Path) -> Path:
-    """Add TP_GOODNESS to every grove_forest PSM and write KS-based good/bad calls.
+    """Add per-side TP_GOODNESS to every grove_forest PSM and write KS-based good/bad calls.
 
     Args:
         grove_forest_dir: Directory of IForest-scored ``grove_forest/results/*.parquet``
-            files (must already have ``ISO_scores``/``ISO_labels`` columns from the
-            IForest stage).
+            files (must already have ``ISO_scores_database``/``ISO_scores_denovo``
+            columns from the IForest stage).
 
     Returns:
         The ``grove_forest_dir/qc`` directory the outputs were written to.
@@ -217,27 +259,33 @@ def run(grove_forest_dir: Path) -> Path:
     files = sorted(results_dir.glob("*.parquet"))
     if not files:
         raise ValueError(f"No grove_forest parquet files found in {results_dir}")
-    if "ISO_scores" not in pd.read_parquet(files[0], columns=None).columns:
-        raise ValueError(f"{files[0]} has no ISO_scores column -- run the IForest stage first")
+    first_file_columns = pd.read_parquet(files[0], columns=None).columns
+    missing = [f"ISO_scores_{side}" for side in SIDES if f"ISO_scores_{side}" not in first_file_columns]
+    if missing:
+        raise ValueError(f"{files[0]} is missing {missing} -- run the IForest stage first")
 
     qc_dir = grove_forest_dir / "qc"
     qc_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Gathering trusted-shared reference scores from %d file(s)", len(files))
     reference_sorted = _gather_reference_scores(files)
-    logger.info("Trusted-shared reference: %d PSMs", len(reference_sorted))
+    logger.info("Trusted-shared reference: %s", {side: len(scores) for side, scores in reference_sorted.items()})
 
-    logger.info("Scoring TP_GOODNESS and updating %d grove_forest file(s)", len(files))
-    other_scores_parts = _add_goodness_column(files, reference_sorted)
-    other_scores = {name: np.concatenate(parts) for name, parts in other_scores_parts.items()}
+    logger.info("Scoring per-side TP_GOODNESS and updating %d grove_forest file(s)", len(files))
+    other_scores = _add_goodness_column(files, reference_sorted)
 
-    divergence = {name: _ks_divergence(reference_sorted, scores) for name, scores in other_scores.items()}
-    cutoff = float(np.mean([d["statistic_location"] for d in divergence.values()]))
+    # Each side's cutoff comes only from that side's own KS test -- no averaging across
+    # sides, since ISO_scores_database and ISO_scores_denovo are independent scorings.
+    divergence = {
+        only_name: _ks_divergence(reference_sorted[side], other_scores[only_name])
+        for side, only_name in SIDE_ONLY_MERGE.items()
+    }
+    cutoff = {side: float(divergence[only_name]["statistic_location"]) for side, only_name in SIDE_ONLY_MERGE.items()}
     logger.info("KS divergence: %s", divergence)
-    logger.info("Good/bad cutoff (average of statistic_location): ISO_scores>=%.4f is GOOD", cutoff)
+    logger.info("Good/bad cutoffs (per side): %s", cutoff)
 
     summary_rows = [{"comparison": f"trusted_shared vs {name}", **stats} for name, stats in divergence.items()]
-    summary_rows.append({"comparison": "average", "cutoff_iso_scores": cutoff})
+    summary_rows.extend({"comparison": f"cutoff_{side}", "cutoff_iso_scores": value} for side, value in cutoff.items())
     pd.DataFrame(summary_rows).to_csv(qc_dir / "ks_vs_tp_summary.csv", index=False)
 
     _plot_ks_vs_tp(reference_sorted, other_scores, cutoff, qc_dir / "ks_vs_tp.svg")
