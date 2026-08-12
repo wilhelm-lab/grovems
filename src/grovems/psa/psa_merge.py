@@ -98,17 +98,37 @@ def _add_chimeric_column(merged: pd.DataFrame, chimeric_scan_keys: set[tuple[str
     merged["chimeric"] = keys.map(lambda key: pd.notna(key[1]) and (key[0], int(key[1])) in chimeric_scan_keys)
 
 
+_MERGE_KEY_COLUMNS = ("RAW_FILE", "SCAN_NUMBER")
+
+
+def _suffix_non_key_columns(df: pd.DataFrame, suffix: str) -> pd.DataFrame:
+    return df.rename(columns={c: f"{c}{suffix}" for c in df.columns if c not in _MERGE_KEY_COLUMNS})
+
+
 def _merge_search_results(merged_database: pd.DataFrame, merged_denovo: pd.DataFrame) -> pd.DataFrame:
-    merged = merged_database.merge(
-        merged_denovo,
+    # Suffix every non-key column ourselves, unconditionally, rather than relying on
+    # pandas' merge(suffixes=...) -- that only suffixes columns that collide by name
+    # between the two frames. When a raw file has no data at all on one side (e.g. no
+    # database_merged_dir in denovo-only mode, or a one-off missing file), that side's
+    # DataFrame doesn't have most columns to collide with, so its surviving columns
+    # (e.g. SEQUENCE) would come through unsuffixed instead of as SEQUENCE_denovo --
+    # silently breaking every downstream `_database`/`_denovo`-suffixed column lookup.
+    merged = _suffix_non_key_columns(merged_database, "_database").merge(
+        _suffix_non_key_columns(merged_denovo, "_denovo"),
         how="outer",
-        on=["RAW_FILE", "SCAN_NUMBER"],
+        on=list(_MERGE_KEY_COLUMNS),
         indicator=True,
-        suffixes=("_database", "_denovo"),
     )
 
-    for column in ("SpecId", "RAW_FILE", "SCAN_NUMBER"):
-        _coalesce_merged_column(merged, column)
+    _coalesce_merged_column(merged, "SpecId")
+
+    # A side that had no data at all for this raw file never had a SEQUENCE column to
+    # suffix in the first place (see above) -- ensure both still exist (as all-null) so
+    # downstream required-column checks (e.g. psa_merge.run's _add_psa_columns) don't
+    # see this as a missing-data pipeline bug.
+    for column in ("SEQUENCE_database", "SEQUENCE_denovo"):
+        if column not in merged.columns:
+            merged[column] = None
 
     _add_chimeric_column(merged, _chimeric_scan_keys(merged_database))
     add_sequence_match_columns(merged)
@@ -194,14 +214,14 @@ def _add_psa_columns(merged_scan: pd.DataFrame) -> None:
         merged_scan.loc[different_sequence_mask, "PSA_ERROR"] = scored["PSA_ERROR"]
 
 
-def _read_parquet_or_empty(path: Path) -> pd.DataFrame:
-    if not path.exists():
+def _read_parquet_or_empty(path: Optional[Path]) -> pd.DataFrame:
+    if path is None or not path.exists():
         return pd.DataFrame(columns=["SpecId", "RAW_FILE", "SCAN_NUMBER"])
     return pd.read_parquet(path)
 
 
 def run(
-    database_merged_dir: Path,
+    database_merged_dir: Optional[Path],
     denovo_merged_dir: Path,
     grove_forest_dir: Path,
     *,
@@ -211,6 +231,11 @@ def run(
 ) -> Path:
     """Merge every raw file's database+de novo data, run PSA, write grove_forest/results/<raw>.parquet.
 
+    ``database_merged_dir=None`` (denovo-only mode, see ``grovems.rescoring.rescoring.run``)
+    treats every raw file as having no database data at all -- every row comes out
+    ``_merge="denovo_only"``, and PSA classification (which only ever applies to
+    ``shared`` rows) never runs.
+
     Deletes ``database_merged_dir``/``denovo_merged_dir`` once done -- their data now
     lives in ``grove_forest_dir/results``.
     """
@@ -219,10 +244,8 @@ def run(
     results_dir = grove_forest_dir / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    raw_files = sorted(
-        {path.stem for path in database_merged_dir.glob("*.parquet")}
-        | {path.stem for path in denovo_merged_dir.glob("*.parquet")}
-    )
+    database_raw_files = {path.stem for path in database_merged_dir.glob("*.parquet")} if database_merged_dir else set()
+    raw_files = sorted(database_raw_files | {path.stem for path in denovo_merged_dir.glob("*.parquet")})
     if max_raw_files is not None:
         raw_files = raw_files[:max_raw_files]
 
@@ -231,7 +254,8 @@ def run(
         if out_path.exists() and not overwrite_outputs:
             continue
         try:
-            merged_database = _read_parquet_or_empty(database_merged_dir / f"{raw_file}.parquet")
+            database_path = database_merged_dir / f"{raw_file}.parquet" if database_merged_dir else None
+            merged_database = _read_parquet_or_empty(database_path)
             merged_denovo = _read_parquet_or_empty(denovo_merged_dir / f"{raw_file}.parquet")
             merged_scan = _merge_search_results(merged_database, merged_denovo)
             _add_psa_columns(merged_scan)
@@ -240,6 +264,7 @@ def run(
             logger.exception("%s: merge/PSA failed; skipping", raw_file)
             continue
 
-    shutil.rmtree(database_merged_dir, ignore_errors=True)
+    if database_merged_dir is not None:
+        shutil.rmtree(database_merged_dir, ignore_errors=True)
     shutil.rmtree(denovo_merged_dir, ignore_errors=True)
     return grove_forest_dir

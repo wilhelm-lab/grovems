@@ -55,9 +55,14 @@ PERCOLATOR_COLUMNS = ["PSMId", "score", "q-value", "posterior_error_prob"]
 
 @dataclasses.dataclass
 class RescoringResult:
-    """Per-raw-file merged (search+pin+percolator) output dirs, consumed by the PSA stage."""
+    """Per-raw-file merged (search+pin+percolator) output dirs, consumed by the PSA stage.
 
-    database_merged_dir: Path
+    ``database_merged_dir`` is ``None`` in denovo-only mode (``config.denovo_only``) --
+    there is no database branch at all, so ``psa.run`` treats every raw file as having no
+    database data (see ``grovems.psa.psa_merge.run``).
+    """
+
+    database_merged_dir: Optional[Path]
     denovo_merged_dir: Path
 
 
@@ -340,11 +345,11 @@ def _read_search_rescore(search_dir: Path, raw_file: str, keep_columns: list[str
 
 
 def _merge_one_raw_file(
-    raw_file: str, search_dir: Path, keep_columns: list[str], pin_by_raw: Path, percolator_by_raw: Path
+    raw_file: str, search_dir: Path, keep_columns: list[str], pin_by_raw: Path, percolator_by_raw: Optional[Path]
 ) -> pd.DataFrame:
     search = _read_search_rescore(search_dir, raw_file, keep_columns)
     pin = _read_raw_partition(pin_by_raw, raw_file).drop(columns=["RAW_FILE"], errors="ignore")
-    if not pin.empty:
+    if not pin.empty and percolator_by_raw is not None:
         pin["percolator_score"] = pin["SpecId"].map(_load_percolator_scores(percolator_by_raw, raw_file))
 
     if search.empty and pin.empty:
@@ -356,11 +361,14 @@ def _merge_and_partition_branch(
     *,
     branch_dir: Path,
     rescore_tab: Path,
-    percolator_psms: Path,
+    percolator_psms: Optional[Path],
     percolator_decoy_psms: Optional[Path],
     keep_columns: list[str],
 ) -> Path:
-    """Merge rescore.tab + Percolator output + msms/*.rescore into <branch>/merged/<raw>.parquet.
+    """Merge rescore.tab (+ Percolator output, if any) + msms/*.rescore into <branch>/merged/<raw>.parquet.
+
+    ``percolator_psms=None`` (denovo-only mode, see ``run``) skips Percolator output
+    entirely -- the merged data carries no ``percolator_score`` column.
 
     Deletes rescore_tab and the Percolator output file(s) once merged/ is built --
     their data now lives in merged/, so keeping both would just be two copies of the
@@ -390,15 +398,23 @@ def _merge_and_partition_branch(
     raw_files = sorted(path.stem for path in search_dir.glob("*.rescore"))
     logger.info("Merging %d raw file(s) into %s", len(raw_files), merged_dir)
     for raw_file in raw_files:
-        merged = _merge_one_raw_file(raw_file, search_dir, keep_columns, pin_by_raw, percolator_by_raw)
+        merged = _merge_one_raw_file(
+            raw_file, search_dir, keep_columns, pin_by_raw, percolator_by_raw if percolator_psms is not None else None
+        )
         merged.to_parquet(merged_dir / f"{_safe_raw_file(raw_file)}.parquet", index=False, engine="pyarrow")
 
     shutil.rmtree(tmp_dir)
-    logger.info("Deleting %s and Percolator output(s); data now lives in %s", rescore_tab, merged_dir)
+    logger.info(
+        "Deleting %s%s; data now lives in %s",
+        rescore_tab,
+        " and Percolator output(s)" if percolator_psms is not None else "",
+        merged_dir,
+    )
     rescore_tab.unlink()
-    percolator_psms.unlink()
-    if percolator_decoy_psms is not None and percolator_decoy_psms.exists():
-        percolator_decoy_psms.unlink()
+    if percolator_psms is not None:
+        percolator_psms.unlink()
+        if percolator_decoy_psms is not None and percolator_decoy_psms.exists():
+            percolator_decoy_psms.unlink()
     return merged_dir
 
 
@@ -414,41 +430,52 @@ def run(config: GrovemsConfig, outdir: Path) -> RescoringResult:
     Percolator + merge (de novo's Percolator only needs database's weights.csv, not its
     merge).
 
+    With ``config.denovo_only``, there is no database branch at all: de novo's Oktoberfest
+    run computes its own ce_calibration/rt_model (Oktoberfest's normal standalone
+    behavior, rather than reusing a database branch's) and Percolator is skipped
+    entirely -- it's only ever trained on the database branch's real target/decoy
+    competition (de novo's own ``Label`` is always target), so without one there's
+    nothing to train, and nothing to statically apply learned weights from either.
+
     Args:
         config: Pipeline configuration.
         outdir: Top-level output directory (results go under ``outdir/rescoring``).
 
     Returns:
-        The per-branch merged/ directories the PSA stage reads from.
+        The per-branch merged/ directories the PSA stage reads from (``database_merged_dir``
+        is ``None`` for ``config.denovo_only``).
     """
     rescoring_dir = outdir / "rescoring"
     rescoring_dir.mkdir(parents=True, exist_ok=True)
     num_threads = config.num_threads or os.cpu_count() or 1
 
     # --- database branch: Oktoberfest ---
-    if config.database_oktoberfest_dir:
-        database_dir = Path(config.database_oktoberfest_dir)
-        logger.info("Reusing existing Oktoberfest database results: %s", database_dir)
-    else:
-        database_dir = rescoring_dir / "oktoberfest_database"
-        _run_oktoberfest_stage(
-            config,
-            rescoring_dir / "rescoring_config_database.json",
-            output_dir=database_dir,
-            search_path=config.database_search_path,
-            search_type=config.database_search_type,
-            num_threads=num_threads,
-        )
+    database_dir: Optional[Path] = None
+    if not config.denovo_only:
+        if config.database_oktoberfest_dir:
+            database_dir = Path(config.database_oktoberfest_dir)
+            logger.info("Reusing existing Oktoberfest database results: %s", database_dir)
+        else:
+            database_dir = rescoring_dir / "oktoberfest_database"
+            _run_oktoberfest_stage(
+                config,
+                rescoring_dir / "rescoring_config_database.json",
+                output_dir=database_dir,
+                search_path=config.database_search_path,
+                search_type=config.database_search_type,
+                num_threads=num_threads,
+            )
 
-    # --- de novo branch: Oktoberfest (reuses database's ce_calibration/rt_model) ---
+    # --- de novo branch: Oktoberfest (reuses database's ce_calibration/rt_model, unless denovo_only) ---
     if config.denovo_oktoberfest_dir:
         denovo_dir = Path(config.denovo_oktoberfest_dir)
         logger.info("Reusing existing Oktoberfest de novo results: %s", denovo_dir)
     else:
         denovo_dir = rescoring_dir / "oktoberfest_denovo"
         (denovo_dir / "results").mkdir(parents=True, exist_ok=True)
-        _relink(database_dir / "results" / "ce_calibration", denovo_dir / "results" / "ce_calibration")
-        _relink(database_dir / "results" / "rt_model", denovo_dir / "results" / "rt_model")
+        if database_dir is not None:
+            _relink(database_dir / "results" / "ce_calibration", denovo_dir / "results" / "ce_calibration")
+            _relink(database_dir / "results" / "rt_model", denovo_dir / "results" / "rt_model")
 
         _run_oktoberfest_stage(
             config,
@@ -459,6 +486,20 @@ def run(config: GrovemsConfig, outdir: Path) -> RescoringResult:
             num_threads=num_threads,
         )
 
+    if config.denovo_only:
+        denovo_rescore_tab = denovo_dir / "results" / "percolator" / "rescore.tab"
+        logger.info("denovo_only: skipping Percolator, merging de novo's own pin + search output directly")
+        _drop_columns(str(denovo_rescore_tab), str(denovo_rescore_tab), "\t", config.drop_columns_denovo.split())
+        denovo_merged_dir = _merge_and_partition_branch(
+            branch_dir=denovo_dir,
+            rescore_tab=denovo_rescore_tab,
+            percolator_psms=None,
+            percolator_decoy_psms=None,
+            keep_columns=DENOVO_COLUMNS,
+        )
+        return RescoringResult(database_merged_dir=None, denovo_merged_dir=denovo_merged_dir)
+
+    assert database_dir is not None  # guaranteed by the denovo_only early-return above
     database_percolator_dir = database_dir / "results" / "percolator"
     database_rescore_tab = database_percolator_dir / "rescore.tab"
     database_weights = database_percolator_dir / "rescore.percolator.weights.csv"

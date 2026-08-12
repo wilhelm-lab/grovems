@@ -29,6 +29,13 @@ spectra_type: mzML
 database_oktoberfest_dir: null
 denovo_oktoberfest_dir: null
 
+# Denovo-only mode: no database search results at all. database_search_path/
+# database_oktoberfest_dir are ignored; the database Oktoberfest branch, Percolator
+# (only ever trained on the database branch's decoys), and PSA (nothing to compare de
+# novo against) are all skipped. IForest/postprocess/plotting run scoped to de novo
+# alone. Requires iforest_training_source: denovo_score below.
+denovo_only: false
+
 # ---- rescoring stage: Oktoberfest / Prosit ----
 irt_model: Prosit_2019_irt
 intensity_model: Prosit_2020_intensity_HCD

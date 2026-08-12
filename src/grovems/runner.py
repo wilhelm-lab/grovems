@@ -19,7 +19,12 @@ def _require(config: GrovemsConfig, field_name: str) -> None:
 
 
 def run(config: GrovemsConfig) -> None:
-    """Run the pipeline: rescoring -> PSA -> IForest, per ``config``'s stage toggles."""
+    """Run the pipeline: rescoring -> PSA -> IForest, per ``config``'s stage toggles.
+
+    With ``config.denovo_only``, the database branch/Percolator/PSA are skipped entirely
+    (see ``rescoring.run``/``psa.run``) and postprocess/plotting run their de novo-only
+    variants instead.
+    """
     outdir = Path(config.outdir)
 
     if config.run_psa and not config.run_rescoring:
@@ -28,17 +33,32 @@ def run(config: GrovemsConfig) -> None:
             "rescoring outputs, not an external directory). Enable both."
         )
 
+    if (
+        config.denovo_only
+        and (config.run_iforest or config.run_postprocess)
+        and config.iforest_training_source != "denovo_score"
+    ):
+        raise ValueError(
+            "denovo_only=True requires iforest_training_source='denovo_score' -- "
+            "'percolator_percentile' needs a database-side Percolator score that won't exist."
+        )
+
     rescoring_result = None
     if config.run_rescoring:
         # database_search_path/denovo_search_path/rawdata_path are only needed for
         # branches that aren't reusing an existing Oktoberfest output directory.
-        if not config.database_oktoberfest_dir:
-            _require(config, "database_search_path")
-        if not config.denovo_oktoberfest_dir:
-            _require(config, "denovo_search_path")
-        if not (config.database_oktoberfest_dir and config.denovo_oktoberfest_dir):
-            _require(config, "rawdata_path")
-        logger.info("Running rescoring stage")
+        if config.denovo_only:
+            if not config.denovo_oktoberfest_dir:
+                _require(config, "denovo_search_path")
+                _require(config, "rawdata_path")
+        else:
+            if not config.database_oktoberfest_dir:
+                _require(config, "database_search_path")
+            if not config.denovo_oktoberfest_dir:
+                _require(config, "denovo_search_path")
+            if not (config.database_oktoberfest_dir and config.denovo_oktoberfest_dir):
+                _require(config, "rawdata_path")
+        logger.info("Running rescoring stage%s", " (denovo-only, no database)" if config.denovo_only else "")
         rescoring_result = rs.run(config, outdir)
 
     grove_forest_dir = outdir / "rescoring" / "grove_forest"
@@ -77,7 +97,10 @@ def run(config: GrovemsConfig) -> None:
             _require(config, "grove_forest_dir")
             grove_forest_dir = Path(config.grove_forest_dir)
         logger.info("Running postprocess (ECDF/KS) stage")
-        pp.run(grove_forest_dir)
+        if config.denovo_only:
+            pp.run_denovo_only(grove_forest_dir, config.iforest_denovo_score_threshold)
+        else:
+            pp.run(grove_forest_dir)
         ran_postprocess = True
 
     if config.run_plotting:
@@ -85,6 +108,9 @@ def run(config: GrovemsConfig) -> None:
             _require(config, "grove_forest_dir")
             grove_forest_dir = Path(config.grove_forest_dir)
         logger.info("Running plotting stage")
-        plot.run(grove_forest_dir)
+        if config.denovo_only:
+            plot.run_denovo_only(grove_forest_dir)
+        else:
+            plot.run(grove_forest_dir)
 
     logger.info("Done.")

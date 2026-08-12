@@ -47,6 +47,16 @@ class GrovemsConfig:
     database_oktoberfest_dir: Optional[str] = None
     denovo_oktoberfest_dir: Optional[str] = None
 
+    # Denovo-only mode: no database search results at all. database_search_path/
+    # database_oktoberfest_dir are ignored; the database Oktoberfest branch, Percolator
+    # (trained only on the database branch's decoys -- de novo's own Label is always
+    # target, so there's nothing to train or statically apply weights from without one),
+    # and PSA (nothing to compare de novo against) are all skipped. IForest, postprocess,
+    # and plotting run scoped to de novo alone. Requires iforest_training_source=
+    # "denovo_score" (percolator_percentile needs a database-side Percolator score that
+    # won't exist).
+    denovo_only: bool = False
+
     # ---- rescoring stage: Oktoberfest / Prosit ----
     irt_model: str = "Prosit_2019_irt"
     intensity_model: str = "Prosit_2020_intensity_HCD"

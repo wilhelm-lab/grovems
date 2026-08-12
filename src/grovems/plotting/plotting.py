@@ -89,6 +89,29 @@ def _plot_peptide_length_distribution(database_lengths: np.ndarray, denovo_lengt
     plt.close(fig)
 
 
+def _plot_peptide_length_distribution_denovo(denovo_lengths: np.ndarray, out_path: Path) -> None:
+    """Peptide length distribution, de novo only (denovo_only mode -- no database side)."""
+    lo, hi = int(denovo_lengths.min()), int(denovo_lengths.max())
+    bins = np.arange(lo, hi + 2) - 0.5
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.hist(
+        denovo_lengths,
+        bins=bins,
+        density=True,
+        histtype="step",
+        lw=1.8,
+        color=postprocess.DETECTION_LEVEL_COLORS["denovo"],
+        label=f"denovo (n={len(denovo_lengths):,}, median {np.median(denovo_lengths):.0f})",
+    )
+    ax.set_xlabel("peptide length")
+    ax.set_ylabel("density")
+    ax.set_title("Peptide length distribution -- de novo")
+    ax.legend(fontsize=9)
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close(fig)
+
+
 def _plot_perc_vs_iso(
     percolator: np.ndarray,
     iso: np.ndarray,
@@ -251,6 +274,34 @@ def run(grove_forest_dir: Path, qc_dir: Optional[Path] = None) -> Path:
         "denovo",
         qc_dir / "perc_vs_iso_denovo.svg",
     )
+
+    logger.info("Plotting QC written to %s", qc_dir)
+    return qc_dir
+
+
+def run_denovo_only(grove_forest_dir: Path, qc_dir: Optional[Path] = None) -> Path:
+    """De novo-only variant of :func:`run` -- no database side exists (see ``grovems.runner.run``).
+
+    Every other plot :func:`run` produces is inherently two-engine: the shared-scan Venn
+    and Levenshtein distance both need a database sequence to compare de novo against,
+    and both percolator-vs-iso plots need a ``percolator_score`` -- Percolator itself
+    doesn't run in denovo_only mode (see ``grovems.rescoring.rescoring.run``), on either
+    side. Only the peptide length distribution survives, de novo alone.
+    """
+    results_dir = grove_forest_dir / "results"
+    files = sorted(results_dir.glob("*.parquet"))
+    if not files:
+        raise ValueError(f"No grove_forest parquet files found in {results_dir}")
+
+    qc_dir = qc_dir or grove_forest_dir / "qc"
+    qc_dir.mkdir(parents=True, exist_ok=True)
+
+    combined = pd.concat([pd.read_parquet(path, columns=["SEQUENCE_denovo"]) for path in files], ignore_index=True)
+    dn_len = combined["SEQUENCE_denovo"].dropna().str.len().to_numpy()
+    if len(dn_len):
+        _plot_peptide_length_distribution_denovo(dn_len, qc_dir / "peptide_length_distribution.svg")
+    else:
+        logger.warning("No SEQUENCE_denovo values found; skipping peptide_length_distribution.svg")
 
     logger.info("Plotting QC written to %s", qc_dir)
     return qc_dir
