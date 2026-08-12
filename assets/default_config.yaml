@@ -29,11 +29,8 @@ spectra_type: mzML
 database_oktoberfest_dir: null
 denovo_oktoberfest_dir: null
 
-# Denovo-only mode: no database search results at all. database_search_path/
-# database_oktoberfest_dir are ignored; the database Oktoberfest branch, Percolator
-# (only ever trained on the database branch's decoys), and PSA (nothing to compare de
-# novo against) are all skipped. IForest/postprocess/plotting run scoped to de novo
-# alone. Requires iforest_training_source: denovo_score below.
+# No database search results at all: skips the database branch and Percolator
+# entirely. Requires iforest_training_source: denovo_score below.
 denovo_only: false
 
 # ---- rescoring stage: Oktoberfest / Prosit ----
@@ -89,11 +86,8 @@ iforest_features:
   - fraction_observed_but_not_predicted
   - fraction_observed_but_not_predicted_vs_predicted
   - spectral_angle
-# How the SUOD training set is picked:
-#   percolator_percentile (default) -- trusted shared PSMs (target, database-side
-#       Percolator score > 0), then the top 30% by that Percolator score.
-#   denovo_score -- PSMs with a de novo call (denovo_only or shared) whose SCORE_denovo
-#       is at least iforest_denovo_score_threshold, independent of Percolator/database.
+# How the SUOD training set is picked: percolator_percentile (default, top 30% of
+# trusted shared PSMs by Percolator score) or denovo_score (SCORE_denovo >= threshold).
 iforest_training_source: percolator_percentile
 iforest_denovo_score_threshold: 0.9   # only used when iforest_training_source is denovo_score
 # Only needed when run_iforest is true but run_psa is false (standalone iforest run);

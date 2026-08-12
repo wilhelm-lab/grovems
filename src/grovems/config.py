@@ -47,14 +47,9 @@ class GrovemsConfig:
     database_oktoberfest_dir: Optional[str] = None
     denovo_oktoberfest_dir: Optional[str] = None
 
-    # Denovo-only mode: no database search results at all. database_search_path/
-    # database_oktoberfest_dir are ignored; the database Oktoberfest branch, Percolator
-    # (trained only on the database branch's decoys -- de novo's own Label is always
-    # target, so there's nothing to train or statically apply weights from without one),
-    # and PSA (nothing to compare de novo against) are all skipped. IForest, postprocess,
-    # and plotting run scoped to de novo alone. Requires iforest_training_source=
-    # "denovo_score" (percolator_percentile needs a database-side Percolator score that
-    # won't exist).
+    # No database search results at all: skips the database branch and Percolator
+    # entirely, scoping IForest/postprocess/plotting to de novo alone. Requires
+    # iforest_training_source="denovo_score".
     denovo_only: bool = False
 
     # ---- rescoring stage: Oktoberfest / Prosit ----
@@ -105,12 +100,9 @@ class GrovemsConfig:
     # SUOD feature columns to train/score on -- inlined here rather than a separate
     # config_train.yaml file.
     iforest_features: list[str] = dataclasses.field(default_factory=list)
-    # How the SUOD training set is picked (see grovems.iforest.select_training_candidates):
-    #   "percolator_percentile" (default) -- trusted shared PSMs (target, database-side
-    #       Percolator score > 0), then the top 30% by that Percolator score.
-    #   "denovo_score" -- PSMs with a de novo call (denovo_only or shared) whose
-    #       SCORE_denovo is at least iforest_denovo_score_threshold, independent of
-    #       anything Percolator/database-side.
+    # How the SUOD training set is picked: "percolator_percentile" (default, top 30% of
+    # trusted shared PSMs by database-side Percolator score) or "denovo_score" (PSMs
+    # with SCORE_denovo >= iforest_denovo_score_threshold).
     iforest_training_source: str = "percolator_percentile"
     # Only used when iforest_training_source == "denovo_score".
     iforest_denovo_score_threshold: float = 0.9
@@ -137,13 +129,7 @@ class GrovemsConfig:
         return cls(**data)
 
     def apply_overrides(self, overrides: list[str]) -> None:
-        """Apply ``key=value`` overrides in place (as from ``--set``), YAML-typed.
-
-        Args:
-            overrides: Strings of the form ``"key=value"``; ``value`` is parsed with
-                ``yaml.safe_load`` so ``true``/``false``/numbers/plain strings all come
-                out the same type they would if written directly in the config file.
-        """
+        """Apply "key=value" overrides in place (as from --set); value is YAML-typed like the config file."""
         known_fields = {f.name for f in dataclasses.fields(self)}
         for item in overrides:
             if "=" not in item:

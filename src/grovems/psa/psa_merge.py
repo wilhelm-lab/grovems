@@ -9,6 +9,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 from tqdm.auto import tqdm
 
 from .psa_classifier import PSA
@@ -54,86 +55,61 @@ def add_sequence_match_columns(df: pd.DataFrame) -> None:
     df["sequence_match"] = df["modified_sequence_match"] & df["precursor_charge_match"]
 
 
-def _merge_label_mapping() -> dict[str, str]:
-    return {"right_only": "denovo_only", "left_only": "database_only", "both": "shared"}
-
-
-def _coalesce_merged_column(merged: pd.DataFrame, column: str) -> None:
-    left_column = f"{column}_database"
-    right_column = f"{column}_denovo"
-    if left_column not in merged.columns and right_column not in merged.columns:
-        return
-    left_values = merged[left_column] if left_column in merged.columns else pd.Series(index=merged.index, dtype="object")
-    right_values = merged[right_column] if right_column in merged.columns else pd.Series(index=merged.index, dtype="object")
-    merged[column] = left_values.combine_first(right_values)
-
-
-def _chimeric_scan_keys(merged_database: pd.DataFrame) -> set[tuple[str, int]]:
-    required = ["RAW_FILE", "SCAN_NUMBER", "SEQUENCE"]
-    missing = [column for column in required if column not in merged_database.columns]
-    if missing or merged_database.empty:
-        return set()
-
-    database = merged_database.dropna(subset=required).copy()
-    if database.empty:
-        return set()
-
-    database["SCAN_NUMBER"] = pd.to_numeric(database["SCAN_NUMBER"], errors="coerce")
-    database = database.dropna(subset=["SCAN_NUMBER"])
-    if database.empty:
-        return set()
-
-    counts = database.groupby(["RAW_FILE", "SCAN_NUMBER"], observed=True)["SEQUENCE"].nunique()
-    chimeric = counts[counts > 1]
-    return {(str(raw_file), int(scan_number)) for raw_file, scan_number in chimeric.index}
-
-
-def _add_chimeric_column(merged: pd.DataFrame, chimeric_scan_keys: set[tuple[str, int]]) -> None:
-    if not {"RAW_FILE", "SCAN_NUMBER"}.issubset(merged.columns) or not chimeric_scan_keys:
-        merged["chimeric"] = False
-        return
-
-    scan_number = pd.to_numeric(merged["SCAN_NUMBER"], errors="coerce")
-    keys = pd.Series(zip(merged["RAW_FILE"].astype(str), scan_number), index=merged.index, dtype="object")
-    merged["chimeric"] = keys.map(lambda key: pd.notna(key[1]) and (key[0], int(key[1])) in chimeric_scan_keys)
-
-
 _MERGE_KEY_COLUMNS = ("RAW_FILE", "SCAN_NUMBER")
 
 
-def _suffix_non_key_columns(df: pd.DataFrame, suffix: str) -> pd.DataFrame:
-    return df.rename(columns={c: f"{c}{suffix}" for c in df.columns if c not in _MERGE_KEY_COLUMNS})
-
-
 def _merge_search_results(merged_database: pd.DataFrame, merged_denovo: pd.DataFrame) -> pd.DataFrame:
-    # Suffix every non-key column ourselves, unconditionally, rather than relying on
-    # pandas' merge(suffixes=...) -- that only suffixes columns that collide by name
-    # between the two frames. When a raw file has no data at all on one side (e.g. no
-    # database_merged_dir in denovo-only mode, or a one-off missing file), that side's
-    # DataFrame doesn't have most columns to collide with, so its surviving columns
-    # (e.g. SEQUENCE) would come through unsuffixed instead of as SEQUENCE_denovo --
-    # silently breaking every downstream `_database`/`_denovo`-suffixed column lookup.
-    merged = _suffix_non_key_columns(merged_database, "_database").merge(
-        _suffix_non_key_columns(merged_denovo, "_denovo"),
+    def suffix_non_key_columns(df: pd.DataFrame, suffix: str) -> pd.DataFrame:
+        return df.rename(columns={c: f"{c}{suffix}" for c in df.columns if c not in _MERGE_KEY_COLUMNS})
+
+    # Suffix columns ourselves rather than pandas' merge(suffixes=...), which only
+    # suffixes columns that collide by name -- if a raw file has no data at all on one
+    # side, that side has nothing to collide with, so its columns would come through
+    # unsuffixed instead of e.g. SEQUENCE_denovo.
+    merged = suffix_non_key_columns(merged_database, "_database").merge(
+        suffix_non_key_columns(merged_denovo, "_denovo"),
         how="outer",
         on=list(_MERGE_KEY_COLUMNS),
         indicator=True,
     )
 
-    _coalesce_merged_column(merged, "SpecId")
+    # Coalesce SpecId (present, suffixed, on whichever side(s) had it).
+    left_specid = merged["SpecId_database"] if "SpecId_database" in merged.columns else None
+    right_specid = merged["SpecId_denovo"] if "SpecId_denovo" in merged.columns else None
+    if left_specid is not None or right_specid is not None:
+        empty = pd.Series(index=merged.index, dtype="object")
+        merged["SpecId"] = (left_specid if left_specid is not None else empty).combine_first(
+            right_specid if right_specid is not None else empty
+        )
 
-    # A side that had no data at all for this raw file never had a SEQUENCE column to
-    # suffix in the first place (see above) -- ensure both still exist (as all-null) so
-    # downstream required-column checks (e.g. psa_merge.run's _add_psa_columns) don't
-    # see this as a missing-data pipeline bug.
+    # A side with no data at all for this file never had a SEQUENCE column to suffix
+    # above -- add it as all-null so required-column checks below don't see this as
+    # a missing-data bug.
     for column in ("SEQUENCE_database", "SEQUENCE_denovo"):
         if column not in merged.columns:
             merged[column] = None
 
-    _add_chimeric_column(merged, _chimeric_scan_keys(merged_database))
+    # Flag scans where the database side called more than one distinct peptide (chimeric spectra).
+    chimeric_required = ["RAW_FILE", "SCAN_NUMBER", "SEQUENCE"]
+    chimeric_scan_keys: set[tuple[str, int]] = set()
+    if not merged_database.empty and set(chimeric_required).issubset(merged_database.columns):
+        database = merged_database.dropna(subset=chimeric_required).copy()
+        database["SCAN_NUMBER"] = pd.to_numeric(database["SCAN_NUMBER"], errors="coerce")
+        database = database.dropna(subset=["SCAN_NUMBER"])
+        if not database.empty:
+            counts = database.groupby(["RAW_FILE", "SCAN_NUMBER"], observed=True)["SEQUENCE"].nunique()
+            chimeric_scan_keys = {(str(raw), int(scan)) for raw, scan in counts[counts > 1].index}
+
+    if {"RAW_FILE", "SCAN_NUMBER"}.issubset(merged.columns) and chimeric_scan_keys:
+        scan_number = pd.to_numeric(merged["SCAN_NUMBER"], errors="coerce")
+        keys = pd.Series(zip(merged["RAW_FILE"].astype(str), scan_number), index=merged.index, dtype="object")
+        merged["chimeric"] = keys.map(lambda key: pd.notna(key[1]) and (key[0], int(key[1])) in chimeric_scan_keys)
+    else:
+        merged["chimeric"] = False
+
     add_sequence_match_columns(merged)
 
-    merged["_merge"] = merged["_merge"].map(_merge_label_mapping())
+    merged["_merge"] = merged["_merge"].map({"right_only": "denovo_only", "left_only": "database_only", "both": "shared"})
     return merged
 
 
@@ -154,15 +130,10 @@ def _run_psa_pair(sequence1, sequence2):
     return (_WORKER_PSA.result.label, _WORKER_PSA.result.similarity, _WORKER_PSA.result.levenshtein_distance, None)
 
 
-def _choose_chunksize(total_items: int, n_workers: int) -> int:
-    if total_items <= 0:
-        return 1
-    return max(1, total_items // max(1, n_workers * 8))
-
-
 def _run_psa_for_pairs(sequences_database: pd.Series, sequences_denovo: pd.Series) -> pd.DataFrame:
     n_workers = PSA_MAX_WORKERS
-    chunksize = _choose_chunksize(len(sequences_database), n_workers)
+    total_items = len(sequences_database)
+    chunksize = 1 if total_items <= 0 else max(1, total_items // max(1, n_workers * 8))
     with ProcessPoolExecutor(max_workers=n_workers, initializer=_init_psa_worker) as executor:
         rows = list(
             tqdm(
@@ -214,9 +185,21 @@ def _add_psa_columns(merged_scan: pd.DataFrame) -> None:
         merged_scan.loc[different_sequence_mask, "PSA_ERROR"] = scored["PSA_ERROR"]
 
 
-def _read_parquet_or_empty(path: Optional[Path]) -> pd.DataFrame:
+def _branch_schema_columns(directory: Optional[Path]) -> list[str]:
+    """Column names of any one file in ``directory`` -- every file in a branch shares the same
+    schema (same keep_columns/pin/percolator columns throughout), so one file's schema stands
+    in as the template for backfilling a raw file that's entirely missing from this branch.
+    """
+    if directory is not None:
+        first = next(directory.glob("*.parquet"), None)
+        if first is not None:
+            return pq.ParquetFile(first).schema_arrow.names
+    return ["SpecId", "RAW_FILE", "SCAN_NUMBER"]
+
+
+def _read_parquet_or_empty(path: Optional[Path], template_columns: list[str]) -> pd.DataFrame:
     if path is None or not path.exists():
-        return pd.DataFrame(columns=["SpecId", "RAW_FILE", "SCAN_NUMBER"])
+        return pd.DataFrame(columns=template_columns)
     return pd.read_parquet(path)
 
 
@@ -231,12 +214,8 @@ def run(
 ) -> Path:
     """Merge every raw file's database+de novo data, run PSA, write grove_forest/results/<raw>.parquet.
 
-    ``database_merged_dir=None`` (denovo-only mode, see ``grovems.rescoring.rescoring.run``)
-    treats every raw file as having no database data at all -- every row comes out
-    ``_merge="denovo_only"``, and PSA classification (which only ever applies to
-    ``shared`` rows) never runs.
-
-    Deletes ``database_merged_dir``/``denovo_merged_dir`` once done -- their data now
+    ``database_merged_dir=None`` (denovo_only mode) makes every row come out
+    ``_merge="denovo_only"``. Deletes both merged dirs once done -- their data now
     lives in ``grove_forest_dir/results``.
     """
     global PSA_MAX_WORKERS
@@ -249,14 +228,20 @@ def run(
     if max_raw_files is not None:
         raw_files = raw_files[:max_raw_files]
 
+    # A raw file missing entirely from one branch (e.g. database found zero PSMs for it, or
+    # denovo_only mode where the whole branch is absent) still needs that side's full column
+    # set so every _database/_denovo-suffixed column downstream stages expect actually exists.
+    database_template = _branch_schema_columns(database_merged_dir)
+    denovo_template = _branch_schema_columns(denovo_merged_dir)
+
     for raw_file in tqdm(raw_files, desc="Merging + PSA"):
         out_path = results_dir / f"{raw_file}.parquet"
         if out_path.exists() and not overwrite_outputs:
             continue
         try:
             database_path = database_merged_dir / f"{raw_file}.parquet" if database_merged_dir else None
-            merged_database = _read_parquet_or_empty(database_path)
-            merged_denovo = _read_parquet_or_empty(denovo_merged_dir / f"{raw_file}.parquet")
+            merged_database = _read_parquet_or_empty(database_path, database_template)
+            merged_denovo = _read_parquet_or_empty(denovo_merged_dir / f"{raw_file}.parquet", denovo_template)
             merged_scan = _merge_search_results(merged_database, merged_denovo)
             _add_psa_columns(merged_scan)
             merged_scan.to_parquet(out_path, index=False, engine="pyarrow")

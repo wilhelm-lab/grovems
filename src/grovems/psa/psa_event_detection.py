@@ -15,12 +15,7 @@ class EventDetectionMixin:
     """Pairwise alignment and per-block event-candidate detection."""
 
     def build_aligner(self) -> Align.PairwiseAligner:
-        """Build the global pairwise aligner PSA uses for all sequence comparisons.
-
-        Returns:
-            A configured ``Bio.Align.PairwiseAligner`` (global mode, match=1,
-            mismatch=0, gap-open=gap-extend=-1).
-        """
+        """Global pairwise aligner PSA uses for all sequence comparisons (match=1, mismatch=0, gap=-1)."""
         aligner = Align.PairwiseAligner()
         aligner.mode = "global"
         aligner.match_score = 1.0
@@ -39,22 +34,8 @@ class EventDetectionMixin:
         self._debug("Alignment stored: identities=%s gaps=%s", counts.identities, counts.gaps)
 
     @staticmethod
-    def _alignment_columns_for(
-        sequence1: str,
-        sequence2: str,
-        alignment: Any,
-    ) -> list[Dict[str, Any]]:
-        """Expand an alignment into one dict per aligned column.
-
-        Args:
-            sequence1: First sequence (as passed to the aligner).
-            sequence2: Second sequence (as passed to the aligner).
-            alignment: A ``Bio.Align`` alignment of ``sequence1``/``sequence2``.
-
-        Returns:
-            List of per-column dicts: ``alignment_idx``, ``seq1_idx``/``seq2_idx``
-            (``None`` for a gap), and ``seq1_aa``/``seq2_aa`` (``""`` for a gap).
-        """
+    def _alignment_columns_for(sequence1: str, sequence2: str, alignment: Any) -> list[Dict[str, Any]]:
+        """Expand an alignment into one dict per column: alignment_idx, seq1/2_idx (None=gap), seq1/2_aa ('' =gap)."""
         seq1_indices, seq2_indices = alignment.indices
         columns: list[Dict[str, Any]] = []
 
@@ -77,61 +58,23 @@ class EventDetectionMixin:
 
     @staticmethod
     def _window_sequences(columns: list[Dict[str, Any]]) -> Tuple[str, str, Tuple[int, ...]]:
-        """Reconstruct the (gap-free) subsequences and seq1 positions covered by ``columns``.
-
-        Args:
-            columns: A contiguous slice of alignment columns.
-
-        Returns:
-            ``(sequence1_fragment, sequence2_fragment, seq1_positions)``.
-        """
+        """Reconstruct the gap-free (sequence1_fragment, sequence2_fragment, seq1_positions) covered by columns."""
         sequence1 = "".join(column["seq1_aa"] for column in columns if column["seq1_idx"] is not None)
         sequence2 = "".join(column["seq2_aa"] for column in columns if column["seq2_idx"] is not None)
         seq1_positions = tuple(column["seq1_idx"] for column in columns if column["seq1_idx"] is not None)
         return sequence1, sequence2, seq1_positions
 
-    @staticmethod
-    def _changed_alignment_runs(columns: list[Dict[str, Any]]) -> list[list[Dict[str, Any]]]:
-        """Split alignment columns into maximal runs of consecutive mismatched/gapped columns.
+    def local_event_from_columns(self, columns: list[Dict[str, Any]]) -> Optional[Tuple[str, Any]]:
+        """Classify one changed run of columns into a single named event, or None if not a change."""
+        if not columns:
+            return None
 
-        Args:
-            columns: Full per-column alignment view (as from ``_alignment_columns_for``).
-
-        Returns:
-            List of column-runs, each a contiguous block where ``seq1_aa != seq2_aa``.
-        """
-        runs: list[list[Dict[str, Any]]] = []
-        current_run: list[Dict[str, Any]] = []
-
-        for column in columns:
-            if column["seq1_aa"] == column["seq2_aa"]:
-                if current_run:
-                    runs.append(current_run)
-                    current_run = []
-                continue
-            current_run.append(column)
-
-        if current_run:
-            runs.append(current_run)
-
-        return runs
-
-    @classmethod
-    def _local_block_details(cls, columns: list[Dict[str, Any]]) -> Dict[str, Any]:
-        """Summarize one changed run of alignment columns into a generic event-detail dict.
-
-        Args:
-            columns: One run of changed columns, as from ``_changed_alignment_runs``.
-
-        Returns:
-            Dict with ``pos``, ``k`` (width), ``sequence 1``/``sequence 2`` fragments,
-            and the seq1/seq2/alignment index lists covered by the run.
-        """
-        block_sequence1, block_sequence2, seq1_positions = cls._window_sequences(columns)
+        # Summarize the run into a generic event-detail dict (pos, k, sequences, indices);
+        # every branch below returns this, some adding their own extra fields first.
+        block_sequence1, block_sequence2, seq1_positions = self._window_sequences(columns)
         seq2_positions = tuple(column["seq2_idx"] for column in columns if column["seq2_idx"] is not None)
         anchor_positions = seq1_positions or seq2_positions or (0,)
-
-        return {
+        details = {
             "pos": min(anchor_positions),
             "k": max(len(seq1_positions), len(seq2_positions), 1),
             "sequence 1": block_sequence1,
@@ -140,28 +83,6 @@ class EventDetectionMixin:
             "seq2_indices": list(seq2_positions),
             "alignment_indices": [column["alignment_idx"] for column in columns],
         }
-
-    def local_event_from_columns(
-        self,
-        columns: list[Dict[str, Any]],
-    ) -> Optional[Tuple[str, Any]]:
-        """Classify one changed run of alignment columns into a single named event.
-
-        Args:
-            columns: One run of changed columns, as from ``_changed_alignment_runs``.
-
-        Returns:
-            ``(event_name, event_details)`` -- one of ``DELETION``/``INSERTION``/
-            ``ADJACENT_SWAP``/``BLOCK_SHUFFLE``/``ISOBARIC-SUBSTITUTION``/
-            ``LOCAL-REARRANGEMENT``/``SUBSTITUTION`` -- or ``None`` if the run turns
-            out not to represent a change (e.g. empty).
-        """
-        if not columns:
-            return None
-
-        details = self._local_block_details(columns)
-        block_sequence1 = details["sequence 1"]
-        block_sequence2 = details["sequence 2"]
         if block_sequence1 == block_sequence2:
             return None
 
@@ -200,23 +121,24 @@ class EventDetectionMixin:
 
         return ("SUBSTITUTION", [details])
 
-    def local_alignment_events_for(
-        self,
-        sequence1: str,
-        sequence2: str,
-    ) -> list[Tuple[str, Any]]:
-        """Align two sequences and classify every changed run into an event.
-
-        Args:
-            sequence1: First sequence.
-            sequence2: Second sequence.
-
-        Returns:
-            List of ``(event_name, event_details)`` pairs, one per changed run.
-        """
+    def local_alignment_events_for(self, sequence1: str, sequence2: str) -> list[Tuple[str, Any]]:
+        """Align two sequences and classify every changed run into an event."""
         alignment = self.aligner.align(sequence1, sequence2)[0]
         columns = self._alignment_columns_for(sequence1, sequence2, alignment)
-        changed_runs = self._changed_alignment_runs(columns)
+
+        # Split into maximal runs of consecutive mismatched/gapped columns.
+        changed_runs: list[list[Dict[str, Any]]] = []
+        current_run: list[Dict[str, Any]] = []
+        for column in columns:
+            if column["seq1_aa"] == column["seq2_aa"]:
+                if current_run:
+                    changed_runs.append(current_run)
+                    current_run = []
+                continue
+            current_run.append(column)
+        if current_run:
+            changed_runs.append(current_run)
+
         events: list[Tuple[str, Any]] = []
         for changed_run in changed_runs:
             local_event = self.local_event_from_columns(changed_run)
@@ -225,21 +147,9 @@ class EventDetectionMixin:
         return events
 
     def adjacent_substitution_event_for(
-        self,
-        sequence1: str,
-        sequence2: str,
+        self, sequence1: str, sequence2: str
     ) -> Optional[Tuple[str, list[Dict[str, Any]]]]:
-        """Return the single substitution-like event between two sequences, if there's exactly one.
-
-        Args:
-            sequence1: First sequence.
-            sequence2: Second sequence.
-
-        Returns:
-            ``(event_name, event_details)`` if the two sequences differ by exactly one
-            ``SUBSTITUTION``/``ISOBARIC-SUBSTITUTION``/``LOCAL-REARRANGEMENT`` event,
-            else ``None``.
-        """
+        """The single SUBSTITUTION/ISOBARIC-SUBSTITUTION/LOCAL-REARRANGEMENT event, if there's exactly one."""
         local_events = self.local_alignment_events_for(sequence1, sequence2)
         if len(local_events) != 1:
             return None
@@ -251,19 +161,8 @@ class EventDetectionMixin:
         return (event_name, event_details)
 
     @classmethod
-    def _detect_direct_adjacent_swap(
-        cls,
-        columns: list[Dict[str, Any]],
-    ) -> Optional[Dict[str, Any]]:
-        """Detect a 2-residue block that is exactly its own reverse (an adjacent swap).
-
-        Args:
-            columns: A run of changed alignment columns.
-
-        Returns:
-            Event-detail dict if ``columns`` is exactly a 2-residue direct swap
-            (``seq1[i:i+2]`` reversed equals ``seq2[i:i+2]``), else ``None``.
-        """
+    def _detect_direct_adjacent_swap(cls, columns: list[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Detect a 2-residue block that is exactly its own reverse (seq1[i:i+2] reversed == seq2[i:i+2])."""
         sequence1, sequence2, seq1_positions = cls._window_sequences(columns)
         if len(sequence1) != 2 or len(sequence2) != 2 or len(seq1_positions) != 2:
             return None
@@ -289,19 +188,8 @@ class EventDetectionMixin:
         }
 
     @classmethod
-    def _detect_shuffle(
-        cls,
-        columns: list[Dict[str, Any]],
-    ) -> Optional[Dict[str, Any]]:
-        """Detect a 3-4 residue block that is a shuffled anagram of itself between sequences.
-
-        Args:
-            columns: A run of changed alignment columns.
-
-        Returns:
-            Event-detail dict if ``columns`` covers a same-length, same-composition
-            (anagram), 3-4 residue block that differs in order, else ``None``.
-        """
+    def _detect_shuffle(cls, columns: list[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Detect a 3-4 residue block that's a same-composition anagram of itself, differing only in order."""
         sequence1, sequence2, seq1_positions = cls._window_sequences(columns)
         if len(sequence1) < 3 or len(sequence1) > 4 or len(sequence1) != len(sequence2) or not seq1_positions:
             return None
@@ -319,24 +207,15 @@ class EventDetectionMixin:
             "alignment_indices": [column["alignment_idx"] for column in columns],
         }
 
-    @classmethod
-    def _reordering_event_from_columns(
-        cls,
-        columns: list[Dict[str, Any]],
-    ) -> Optional[Tuple[str, Dict[str, Any]]]:
-        """Search every sliding window of ``columns`` for a swap or shuffle event.
+    def reordering_event_for(self, sequence1: str, sequence2: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Align two sequences and look for a swap/shuffle reordering event anywhere in them.
 
-        Args:
-            columns: Full per-column alignment view.
-
-        Returns:
-            The first ``(event_name, event_details)`` swap/shuffle found in any
-            window of length 2..``MAX_SHUFFLE_WINDOW_LENGTH``, else ``None``.
+        Searches every sliding window of length 2..MAX_SHUFFLE_WINDOW_LENGTH for the first
+        swap/shuffle found.
         """
-        if not columns:
-            return None
-
-        if all(column["seq1_aa"] == column["seq2_aa"] for column in columns):
+        alignment = self.aligner.align(sequence1, sequence2)[0]
+        columns = self._alignment_columns_for(sequence1, sequence2, alignment)
+        if not columns or all(column["seq1_aa"] == column["seq2_aa"] for column in columns):
             return None
 
         for window_length in range(2, min(len(columns), MAX_SHUFFLE_WINDOW_LENGTH) + 1):
@@ -345,111 +224,16 @@ class EventDetectionMixin:
                 if all(column["seq1_aa"] == column["seq2_aa"] for column in window):
                     continue
 
-                adjacent_swap = cls._detect_direct_adjacent_swap(window)
+                adjacent_swap = self._detect_direct_adjacent_swap(window)
                 if adjacent_swap is not None:
                     return ("ADJACENT_SWAP", adjacent_swap)
 
-                block_shuffle = cls._detect_shuffle(window)
+                block_shuffle = self._detect_shuffle(window)
                 if block_shuffle is not None:
                     return ("BLOCK_SHUFFLE", block_shuffle)
 
         return None
 
-    def reordering_event_for(self, sequence1: str, sequence2: str) -> Optional[Tuple[str, Dict[str, Any]]]:
-        """Align two sequences and look for a swap/shuffle reordering event anywhere in them.
-
-        Args:
-            sequence1: First sequence.
-            sequence2: Second sequence.
-
-        Returns:
-            ``(event_name, event_details)`` for the first swap/shuffle found, else ``None``.
-        """
-        alignment = self.aligner.align(sequence1, sequence2)[0]
-        columns = self._alignment_columns_for(sequence1, sequence2, alignment)
-        return self._reordering_event_from_columns(columns)
-
     def reordering_event(self) -> Optional[Tuple[str, Dict[str, Any]]]:
         """``reordering_event_for`` applied to ``self.sequence1``/``self.sequence2``."""
         return self.reordering_event_for(self.sequence1, self.sequence2)
-
-    def _candidate_explains_full_sequence(
-        self,
-        sequence1: str,
-        sequence2: str,
-        event_name: str,
-        event_details: Any,
-    ) -> bool:
-        """Check whether one candidate event accounts for every difference in the full alignment.
-
-        Args:
-            sequence1: First sequence.
-            sequence2: Second sequence.
-            event_name: Candidate event name (only ``IDENTICAL``/``ADJACENT_SWAP``/
-                ``BLOCK_SHUFFLE`` are meaningfully checked; anything else returns
-                ``False``).
-            event_details: The candidate's event-detail dict.
-
-        Returns:
-            ``True`` if every mismatched alignment column outside the candidate's own
-            covered columns is unexplained (i.e. the candidate alone fully explains the
-            difference between ``sequence1`` and ``sequence2``).
-        """
-        if event_name == "IDENTICAL":
-            return sequence1 == sequence2
-
-        if event_name not in {"ADJACENT_SWAP", "BLOCK_SHUFFLE"} or not isinstance(event_details, dict):
-            return False
-
-        alignment_indices = event_details.get("alignment_indices")
-        if not isinstance(alignment_indices, list) or not alignment_indices:
-            return False
-
-        covered_alignment_indices = {int(idx) for idx in alignment_indices}
-        alignment = self.aligner.align(sequence1, sequence2)[0]
-        columns = self._alignment_columns_for(sequence1, sequence2, alignment)
-
-        for column in columns:
-            if int(column["alignment_idx"]) in covered_alignment_indices:
-                continue
-            if column["seq1_aa"] != column["seq2_aa"]:
-                return False
-
-        covered_columns = [column for column in columns if int(column["alignment_idx"]) in covered_alignment_indices]
-        covered_sequence1 = "".join(column["seq1_aa"] for column in covered_columns if column["seq1_idx"] is not None)
-        covered_sequence2 = "".join(column["seq2_aa"] for column in covered_columns if column["seq2_idx"] is not None)
-
-        return covered_sequence1 == str(event_details.get("sequence 1", "")) and covered_sequence2 == str(
-            event_details.get("sequence 2", "")
-        )
-
-    @staticmethod
-    def _apply_reordering_event(
-        sequence: str,
-        event_name: str,
-        event_details: Any,
-    ) -> Optional[str]:
-        """Apply a swap/shuffle event's replacement fragment onto ``sequence``.
-
-        Args:
-            sequence: The sequence to apply the event to.
-            event_name: Must be ``ADJACENT_SWAP`` or ``BLOCK_SHUFFLE`` for anything to
-                happen.
-            event_details: The event's detail dict (needs ``indices`` and
-                ``sequence 2``).
-
-        Returns:
-            ``sequence`` with the covered span replaced by ``event_details["sequence 2"]``,
-            or ``None`` if ``event_name``/``event_details`` don't describe an applicable event.
-        """
-        if event_name not in {"ADJACENT_SWAP", "BLOCK_SHUFFLE"} or not isinstance(event_details, dict):
-            return None
-
-        indices = event_details.get("indices")
-        replacement = event_details.get("sequence 2")
-        if not isinstance(indices, list) or not indices or not isinstance(replacement, str):
-            return None
-
-        start = min(int(idx) for idx in indices)
-        stop = max(int(idx) for idx in indices) + 1
-        return sequence[:start] + replacement + sequence[stop:]

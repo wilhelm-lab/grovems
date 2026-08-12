@@ -204,14 +204,10 @@ def _plot_perc_vs_iso(
 
 
 def run(grove_forest_dir: Path, qc_dir: Optional[Path] = None) -> Path:
-    """Write extra QC plots to ``grove_forest_dir/qc``: shared-scan-vs-PSM Venn,
-    Levenshtein distance, peptide length, and percolator-vs-isolation-score joint
-    density (database and de novo each on their own terms).
+    """Write extra QC plots to grove_forest_dir/qc: shared-scan Venn, Levenshtein, peptide length, percolator-vs-iso.
 
-    Reads straight from ``grove_forest_dir/results/*.parquet`` -- independent of whether
-    ``grovems.postprocess`` already ran in this invocation; cutoffs come from
-    :func:`grovems.postprocess.postprocess.compute_cutoffs`, computed read-only here if
-    needed.
+    Reads straight from grove_forest_dir/results/*.parquet, independent of whether postprocess
+    already ran -- cutoffs come from postprocess.compute_cutoffs, computed read-only if needed.
     """
     results_dir = grove_forest_dir / "results"
     files = sorted(results_dir.glob("*.parquet"))
@@ -280,14 +276,7 @@ def run(grove_forest_dir: Path, qc_dir: Optional[Path] = None) -> Path:
 
 
 def run_denovo_only(grove_forest_dir: Path, qc_dir: Optional[Path] = None) -> Path:
-    """De novo-only variant of :func:`run` -- no database side exists (see ``grovems.runner.run``).
-
-    Every other plot :func:`run` produces is inherently two-engine: the shared-scan Venn
-    and Levenshtein distance both need a database sequence to compare de novo against,
-    and both percolator-vs-iso plots need a ``percolator_score`` -- Percolator itself
-    doesn't run in denovo_only mode (see ``grovems.rescoring.rescoring.run``), on either
-    side. Only the peptide length distribution survives, de novo alone.
-    """
+    """De novo-only variant of run() -- run()'s other plots all need a database side or Percolator scores."""
     results_dir = grove_forest_dir / "results"
     files = sorted(results_dir.glob("*.parquet"))
     if not files:

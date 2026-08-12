@@ -19,18 +19,19 @@ def _require(config: GrovemsConfig, field_name: str) -> None:
 
 
 def run(config: GrovemsConfig) -> None:
-    """Run the pipeline: rescoring -> PSA -> IForest, per ``config``'s stage toggles.
-
-    With ``config.denovo_only``, the database branch/Percolator/PSA are skipped entirely
-    (see ``rescoring.run``/``psa.run``) and postprocess/plotting run their de novo-only
-    variants instead.
-    """
+    """Run the pipeline: rescoring -> PSA -> IForest -> postprocess -> plotting, per config's stage toggles."""
     outdir = Path(config.outdir)
 
     if config.run_psa and not config.run_rescoring:
         raise ValueError(
             "run_psa requires run_rescoring (PSA is chained directly from this invocation's "
             "rescoring outputs, not an external directory). Enable both."
+        )
+
+    if config.iforest_training_source not in ("percolator_percentile", "denovo_score"):
+        raise ValueError(
+            f"Unknown iforest_training_source: {config.iforest_training_source!r} "
+            "(expected 'percolator_percentile' or 'denovo_score')"
         )
 
     if (

@@ -18,16 +18,7 @@ class LevenshteinMixin:
 
     @staticmethod
     def levenshtein_distance(sequence1: str, sequence2: str) -> int:
-        """Compute the classic Levenshtein (edit) distance between two sequences.
-
-        Args:
-            sequence1: First sequence.
-            sequence2: Second sequence.
-
-        Returns:
-            Minimum number of single-residue insertions/deletions/substitutions
-            needed to turn ``sequence1`` into ``sequence2``.
-        """
+        """Minimum single-residue insertions/deletions/substitutions to turn sequence1 into sequence2."""
         if sequence1 == sequence2:
             return 0
         if not sequence1:
@@ -53,15 +44,7 @@ class LevenshteinMixin:
 
     @staticmethod
     def levenshtein_tier(distance: int) -> int:
-        """Map a Levenshtein distance to a coarse PSA tier via ``LEVENSHTEIN_TIER_THRESHOLDS``.
-
-        Args:
-            distance: Levenshtein distance between two sequences.
-
-        Returns:
-            ``0`` for identical sequences, otherwise the tier whose threshold the
-            distance falls under, or ``5`` if it exceeds every threshold.
-        """
+        """Map a distance to a coarse PSA tier via LEVENSHTEIN_TIER_THRESHOLDS (0=identical, 5=beyond every tier)."""
         if distance == 0:
             return 0
         for threshold, tier in LEVENSHTEIN_TIER_THRESHOLDS:
@@ -71,17 +54,7 @@ class LevenshteinMixin:
 
     @staticmethod
     def _trace_edit_operations(sequence1: str, sequence2: str) -> list[Dict[str, Any]]:
-        """Recover the ordered substitution/insertion/deletion ops of an optimal edit path.
-
-        Args:
-            sequence1: First sequence.
-            sequence2: Second sequence.
-
-        Returns:
-            Ordered list of edit-operation dicts (``type``, ``pos``, ``seq1_pos``,
-            ``seq2_pos``, ``from``, ``to``) tracing one minimum-cost edit path from
-            ``sequence1`` to ``sequence2``.
-        """
+        """Ordered substitution/insertion/deletion ops tracing one minimum-cost edit path sequence1 -> sequence2."""
         m = len(sequence1)
         n = len(sequence2)
         dp = [[0] * (n + 1) for _ in range(m + 1)]
@@ -156,15 +129,7 @@ class LevenshteinMixin:
         operations: list[Dict[str, Any]],
         op_type: str,
     ) -> list[Dict[str, Any]]:
-        """Collapse consecutive single-residue insertions/deletions into multi-residue blocks.
-
-        Args:
-            operations: Edit operations as returned by ``_trace_edit_operations``.
-            op_type: Either ``"insertion"`` or ``"deletion"``.
-
-        Returns:
-            List of grouped blocks (``type``, ``pos``, ``k``, ``sequence 1``, ``sequence 2``).
-        """
+        """Collapse consecutive single-residue insertions/deletions (op_type) into multi-residue blocks."""
         grouped: list[Dict[str, Any]] = []
 
         for op in operations:
@@ -206,17 +171,7 @@ class LevenshteinMixin:
 
     @classmethod
     def collect_observed_changes_for_sequences(cls, sequence1: str, sequence2: str) -> Dict[str, Any]:
-        """Trace and summarize every edit operation between two sequences.
-
-        Args:
-            sequence1: First sequence.
-            sequence2: Second sequence.
-
-        Returns:
-            Dict with the raw ``edit_operations``, grouped ``substitutions``/
-            ``insertions``/``deletions``, and their counts (plus a total
-            ``change_count``).
-        """
+        """Trace every edit operation and group them into substitutions/insertions/deletions, with counts."""
         operations = cls._trace_edit_operations(sequence1, sequence2)
         substitutions = [
             {

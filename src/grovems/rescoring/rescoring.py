@@ -57,34 +57,42 @@ PERCOLATOR_COLUMNS = ["PSMId", "score", "q-value", "posterior_error_prob"]
 class RescoringResult:
     """Per-raw-file merged (search+pin+percolator) output dirs, consumed by the PSA stage.
 
-    ``database_merged_dir`` is ``None`` in denovo-only mode (``config.denovo_only``) --
-    there is no database branch at all, so ``psa.run`` treats every raw file as having no
-    database data (see ``grovems.psa.psa_merge.run``).
+    ``database_merged_dir`` is ``None`` in denovo_only mode.
     """
 
     database_merged_dir: Optional[Path]
     denovo_merged_dir: Path
 
 
-def _build_oktoberfest_config(
+def _run_oktoberfest_stage(
+    config: GrovemsConfig,
+    config_path: Path,
     *,
     output_dir: Path,
-    search_results: Path,
-    search_results_type: str,
-    spectra: Path,
-    spectra_type: str,
-    config: GrovemsConfig,
+    search_path: str,
+    search_type: str,
     num_threads: int,
-) -> dict:
+    max_attempts: int = 3,
+    retry_delay_seconds: float = 30.0,
+) -> None:
+    """Write the Oktoberfest job config and run it, retrying the whole job a few times on failure.
+
+    Oktoberfest's JobPool.check_pool() treats any single worker exception -- including
+    a one-off dropped Koina gRPC request, which is not a systemic outage -- as fatal for
+    the entire pool and calls sys.exit(1), aborting a multi-hour run over one transient
+    network blip. Retrying is cheap and safe: Oktoberfest marks each per-raw-file step
+    done via .done files under proc/, so re-running run_job() skips everything already
+    completed and only redoes the file(s) that hadn't finished.
+    """
     cfg = {
         "type": "Rescoring",
         "tag": "",
         "output": str(output_dir),
         "inputs": {
-            "search_results": str(search_results),
-            "search_results_type": search_results_type,
-            "spectra": str(spectra),
-            "spectra_type": spectra_type,
+            "search_results": str(search_path),
+            "search_results_type": search_type,
+            "spectra": str(config.rawdata_path),
+            "spectra_type": config.spectra_type,
         },
         "models": {
             "irt": config.irt_model,
@@ -106,19 +114,8 @@ def _build_oktoberfest_config(
     # instead of falling through to the default, crashing downstream.
     if config.thermo_exe:
         cfg["thermoExe"] = config.thermo_exe
-    return cfg
+    config_path.write_text(json.dumps(cfg, indent=4))
 
-
-def _run_oktoberfest(config_path: Path, *, max_attempts: int = 3, retry_delay_seconds: float = 30.0) -> None:
-    """Run Oktoberfest, retrying the whole job a few times on failure.
-
-    Oktoberfest's JobPool.check_pool() treats any single worker exception -- including
-    a one-off dropped Koina gRPC request, which is not a systemic outage -- as fatal for
-    the entire pool and calls sys.exit(1), aborting a multi-hour run over one transient
-    network blip. Retrying is cheap and safe: Oktoberfest marks each per-raw-file step
-    done via .done files under proc/, so re-running run_job() skips everything already
-    completed and only redoes the file(s) that hadn't finished.
-    """
     logger.info("Running Oktoberfest: %s", config_path)
     for attempt in range(1, max_attempts + 1):
         try:
@@ -140,28 +137,6 @@ def _run_oktoberfest(config_path: Path, *, max_attempts: int = 3, retry_delay_se
             "Oktoberfest attempt %d/%d failed, retrying in %.0fs: %s", attempt, max_attempts, retry_delay_seconds, error
         )
         time.sleep(retry_delay_seconds)
-
-
-def _run_oktoberfest_stage(
-    config: GrovemsConfig,
-    config_path: Path,
-    *,
-    output_dir: Path,
-    search_path: str,
-    search_type: str,
-    num_threads: int,
-) -> None:
-    json_config = _build_oktoberfest_config(
-        output_dir=output_dir,
-        search_results=Path(search_path),
-        search_results_type=search_type,
-        spectra=Path(config.rawdata_path),
-        spectra_type=config.spectra_type,
-        config=config,
-        num_threads=num_threads,
-    )
-    config_path.write_text(json.dumps(json_config, indent=4))
-    _run_oktoberfest(config_path)
 
 
 def _run_percolator(config: GrovemsConfig, args: list[str], *, cwd: Path) -> None:
@@ -212,18 +187,9 @@ def _require_matching_columns(database_columns: list[str], denovo_columns: list[
 
 
 def _drop_columns(input_file: str, output_file: str, delimiter: str, columns_to_drop: list[str]) -> list[str]:
-    """Read a delimited file, drop the given columns, and write the result.
+    """Read a delimited file, drop the given columns, write the result, and return the surviving column order.
 
-    Args:
-        input_file: Path to the input delimited file.
-        output_file: Path to write the column-dropped file to (may be the same path,
-            to filter in place -- the read completes before the write starts).
-        delimiter: Field delimiter, e.g. ``"\\t"``.
-        columns_to_drop: Column names to drop; names not present are ignored.
-
-    Returns:
-        The resulting column names, in order -- used to verify database/de novo feature
-        parity before de novo's static Percolator rescoring (see :func:`run`).
+    Safe to call with output_file == input_file (in-place): the read fully completes before the write starts.
     """
     logger.info("Dropping columns %s: %s -> %s", columns_to_drop, input_file, output_file)
     df = pd.read_csv(input_file, sep=delimiter, engine="c")
@@ -234,14 +200,7 @@ def _drop_columns(input_file: str, output_file: str, delimiter: str, columns_to_
 
 
 def _parse_and_write_avg_weights(path: str, out_path: str, decimals: int = 4) -> None:
-    """Average the per-bin weight vectors in ``path`` and write the result to ``out_path``.
-
-    Args:
-        path: Input file with repeated (header, normalized weights, raw weights) line
-            triples, one triple per bin.
-        out_path: Output file to write the averaged weights to.
-        decimals: Decimal places to round the averages to.
-    """
+    """Average the per-bin weight vectors in path (repeated header/norm/raw line triples) and write to out_path."""
     with open(path) as f:
         lines = [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
@@ -271,10 +230,6 @@ def _safe_raw_file(raw_file: str) -> str:
     return quote(str(raw_file), safe="")
 
 
-def _extract_raw_file(spec_ids: pd.Series) -> pd.Series:
-    return spec_ids.astype("string").str.extract(SPECID_RAW_PATTERN, expand=False)
-
-
 def _partition_by_raw_file(
     input_path: Path, output_root: Path, *, id_column: str, sep: str, chunksize: int, label: str, usecols=None
 ) -> None:
@@ -291,7 +246,7 @@ def _partition_by_raw_file(
         for chunk in reader:
             if chunk.empty:
                 continue
-            chunk["RAW_FILE"] = _extract_raw_file(chunk[id_column])
+            chunk["RAW_FILE"] = chunk[id_column].astype("string").str.extract(SPECID_RAW_PATTERN, expand=False)
             chunk = chunk.loc[chunk["RAW_FILE"].notna()]
             for raw_file, part in chunk.groupby("RAW_FILE", sort=False):
                 table = pa.Table.from_pandas(part, preserve_index=False)
@@ -319,38 +274,30 @@ def _read_raw_partition(root: Path, raw_file: str, columns: Optional[list[str]] 
     return pd.read_parquet(raw_dir, columns=columns)
 
 
-def _load_percolator_scores(percolator_by_raw: Path, raw_file: str) -> pd.Series:
-    scores = _read_raw_partition(percolator_by_raw, raw_file, columns=["PSMId", "score"])
-    if scores.empty:
-        return pd.Series(dtype="float64")
-    scores = scores.drop_duplicates("PSMId", keep="last")
-    return scores.set_index("PSMId")["score"]
-
-
-def _read_search_rescore(search_dir: Path, raw_file: str, keep_columns: list[str]) -> pd.DataFrame:
-    path = search_dir / f"{raw_file}.rescore"
-    if not path.exists():
-        return pd.DataFrame(columns=keep_columns + ["SpecId"])
-
-    df = pd.read_csv(path, sep=",", usecols=keep_columns)
-    if df.empty:
-        df["SpecId"] = pd.Series(dtype="object")
-        return df
-
-    specid = df["RAW_FILE"].astype(str)
-    for column in ("SCAN_NUMBER", "MODIFIED_SEQUENCE", "PRECURSOR_CHARGE"):
-        specid = specid.str.cat(df[column].astype(str), sep="-")
-    df["SpecId"] = specid
-    return df
-
-
 def _merge_one_raw_file(
     raw_file: str, search_dir: Path, keep_columns: list[str], pin_by_raw: Path, percolator_by_raw: Optional[Path]
 ) -> pd.DataFrame:
-    search = _read_search_rescore(search_dir, raw_file, keep_columns)
+    search_path = search_dir / f"{raw_file}.rescore"
+    if not search_path.exists():
+        search = pd.DataFrame(columns=keep_columns + ["SpecId"])
+    else:
+        search = pd.read_csv(search_path, sep=",", usecols=keep_columns)
+        if search.empty:
+            search["SpecId"] = pd.Series(dtype="object")
+        else:
+            specid = search["RAW_FILE"].astype(str)
+            for column in ("SCAN_NUMBER", "MODIFIED_SEQUENCE", "PRECURSOR_CHARGE"):
+                specid = specid.str.cat(search[column].astype(str), sep="-")
+            search["SpecId"] = specid
+
     pin = _read_raw_partition(pin_by_raw, raw_file).drop(columns=["RAW_FILE"], errors="ignore")
     if not pin.empty and percolator_by_raw is not None:
-        pin["percolator_score"] = pin["SpecId"].map(_load_percolator_scores(percolator_by_raw, raw_file))
+        scores = _read_raw_partition(percolator_by_raw, raw_file, columns=["PSMId", "score"])
+        if scores.empty:
+            percolator_scores = pd.Series(dtype="float64")
+        else:
+            percolator_scores = scores.drop_duplicates("PSMId", keep="last").set_index("PSMId")["score"]
+        pin["percolator_score"] = pin["SpecId"].map(percolator_scores)
 
     if search.empty and pin.empty:
         return pd.DataFrame(columns=["SpecId", "RAW_FILE", "SCAN_NUMBER"])
@@ -367,12 +314,9 @@ def _merge_and_partition_branch(
 ) -> Path:
     """Merge rescore.tab (+ Percolator output, if any) + msms/*.rescore into <branch>/merged/<raw>.parquet.
 
-    ``percolator_psms=None`` (denovo-only mode, see ``run``) skips Percolator output
-    entirely -- the merged data carries no ``percolator_score`` column.
-
-    Deletes rescore_tab and the Percolator output file(s) once merged/ is built --
-    their data now lives in merged/, so keeping both would just be two copies of the
-    same rows.
+    ``percolator_psms=None`` skips Percolator output -- merged data carries no
+    ``percolator_score`` column. Deletes rescore_tab and the Percolator output file(s)
+    once merged/ is built -- their data now lives there.
     """
     search_dir = branch_dir / "msms"
     merged_dir = branch_dir / "merged"
@@ -430,12 +374,9 @@ def run(config: GrovemsConfig, outdir: Path) -> RescoringResult:
     Percolator + merge (de novo's Percolator only needs database's weights.csv, not its
     merge).
 
-    With ``config.denovo_only``, there is no database branch at all: de novo's Oktoberfest
-    run computes its own ce_calibration/rt_model (Oktoberfest's normal standalone
-    behavior, rather than reusing a database branch's) and Percolator is skipped
-    entirely -- it's only ever trained on the database branch's real target/decoy
-    competition (de novo's own ``Label`` is always target), so without one there's
-    nothing to train, and nothing to statically apply learned weights from either.
+    With ``config.denovo_only``, there is no database branch: de novo computes its own
+    ce_calibration/rt_model instead of reusing one, and Percolator is skipped entirely
+    (it's only ever trained on the database branch's target/decoy competition).
 
     Args:
         config: Pipeline configuration.
@@ -499,7 +440,8 @@ def run(config: GrovemsConfig, outdir: Path) -> RescoringResult:
         )
         return RescoringResult(database_merged_dir=None, denovo_merged_dir=denovo_merged_dir)
 
-    assert database_dir is not None  # guaranteed by the denovo_only early-return above
+    if database_dir is None:
+        raise RuntimeError("database_dir is None outside denovo_only mode -- this should be unreachable")
     database_percolator_dir = database_dir / "results" / "percolator"
     database_rescore_tab = database_percolator_dir / "rescore.tab"
     database_weights = database_percolator_dir / "rescore.percolator.weights.csv"

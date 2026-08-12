@@ -7,26 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 
 @dataclass
 class PSAResult:
-    """Mutable record of one PSA classification, updated in place as PSA runs.
-
-    Attributes:
-        peptide_sequence: The two compared sequences, ``(sequence1, sequence2)``.
-        monoisotopic_mass: Monoisotopic mass of each sequence, ``(mass1, mass2)``.
-        tier: Levenshtein-distance-derived PSA tier (0 = identical).
-        selected_event: Name of the classified event (e.g. ``"SUBSTITUTION"``).
-        alignment: The ``Bio.Align`` alignment object used for scoring.
-        identity_count: Number of identical aligned positions.
-        normalized_identity: ``identity_count`` normalized by the longer sequence.
-        jaccard_similarity: Legacy Jaccard-style similarity score.
-        levenshtein_distance: Edit distance between the two sequences.
-        similarity: Final similarity score (currently equal to ``normalized_identity``).
-        similarity_level: Coarse bucket label for ``similarity``.
-        isobaric: Whether the two sequences have (near-)equal mass.
-        anagram: Whether the two sequences are exact anagrams of each other.
-        label: Final human-readable PSA label, e.g. ``"PSA - Tier 1 - ISOBARIC - SWAP"``.
-        details: Free-form extra fields attached via :meth:`update` (event details,
-            observed changes, alignment counts, ...).
-    """
+    """Mutable record of one PSA classification, updated in place as PSA runs."""
 
     peptide_sequence: Tuple[str, str] = ("", "")
     monoisotopic_mass: Tuple[float, float] = (0.0, 0.0)
@@ -82,28 +63,7 @@ class PSAResult:
         label: Optional[str] = None,
         **details: Any,
     ) -> PSAResult:
-        """Set any given fields (leaving the rest untouched) and merge extra ``details``.
-
-        Args:
-            peptide_sequence: New ``(sequence1, sequence2)`` pair, if provided.
-            monoisotopic_mass: New ``(mass1, mass2)`` pair, if provided.
-            tier: New PSA tier, if provided.
-            selected_event: New selected event name, if provided.
-            alignment: New alignment object, if provided.
-            identity_count: New identity count, if provided.
-            normalized_identity: New normalized identity, if provided.
-            jaccard_similarity: New Jaccard similarity, if provided.
-            levenshtein_distance: New Levenshtein distance, if provided.
-            similarity: New similarity score, if provided.
-            similarity_level: New similarity level label, if provided.
-            isobaric: New isobaric flag, if provided.
-            anagram: New anagram flag, if provided.
-            label: New final label, if provided.
-            **details: Arbitrary extra key/value pairs merged into ``self.details``.
-
-        Returns:
-            ``self``, for chaining.
-        """
+        """Set any given fields (leaving the rest untouched); extra kwargs merge into self.details."""
         if peptide_sequence is not None:
             self.peptide_sequence = peptide_sequence
         if monoisotopic_mass is not None:

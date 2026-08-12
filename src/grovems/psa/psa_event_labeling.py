@@ -26,15 +26,7 @@ class EventLabelingMixin:
         self,
         observed_changes: Optional[Dict[str, Any]] = None,
     ) -> Optional[Tuple[str, list[Dict[str, Any]]]]:
-        """Build a ``SUBSTITUTION`` event from every observed substitution, if any.
-
-        Args:
-            observed_changes: Precomputed observed-changes dict; computed fresh if not given.
-
-        Returns:
-            ``("SUBSTITUTION", details)`` with one detail entry per substitution, or
-            ``None`` if there were no substitutions.
-        """
+        """Build a ``SUBSTITUTION`` event from every observed substitution, or None if there were none."""
         observed = observed_changes if observed_changes is not None else self.observed_changes()
         substitutions = observed["substitutions"]
         if not substitutions:
@@ -43,40 +35,11 @@ class EventLabelingMixin:
         details = [{"pos": sub["pos"], "from": sub["from"], "to": sub["to"]} for sub in substitutions]
         return ("SUBSTITUTION", details)
 
-    @staticmethod
-    def _indel_event_details(event: Dict[str, Any]) -> list[Dict[str, Any]]:
-        """Reduce a grouped indel block to its reportable fields."""
-        return [
-            {
-                "pos": event["pos"],
-                "k": event["k"],
-                "sequence 1": event["sequence 1"],
-                "sequence 2": event["sequence 2"],
-            }
-        ]
-
-    @staticmethod
-    def _indel_event_name(event: Dict[str, Any]) -> str:
-        """Name a grouped indel block as ``DELETION``, ``INSERTION``, or ``INDEL``."""
-        if event["sequence 1"] and not event["sequence 2"]:
-            return "DELETION"
-        if event["sequence 2"] and not event["sequence 1"]:
-            return "INSERTION"
-        return "INDEL"
-
     def indel_events(
         self,
         observed_changes: Optional[Dict[str, Any]] = None,
     ) -> list[Tuple[str, list[Dict[str, Any]]]]:
-        """Build one event per grouped indel block up to ``MAX_MULTI_AA_INDEL_SIZE`` residues.
-
-        Args:
-            observed_changes: Precomputed observed-changes dict; computed fresh if not given.
-
-        Returns:
-            List of ``(event_name, event_details)`` pairs, ordered by position
-            (insertions before deletions at the same position).
-        """
+        """One event per grouped indel block up to MAX_MULTI_AA_INDEL_SIZE residues, ordered by position."""
         observed = observed_changes if observed_changes is not None else self.observed_changes()
         indel_blocks = sorted(
             observed["insertions"] + observed["deletions"],
@@ -89,22 +52,19 @@ class EventLabelingMixin:
             if k < 1 or k > MAX_MULTI_AA_INDEL_SIZE:
                 continue
 
-            events.append((self._indel_event_name(event), self._indel_event_details(event)))
+            if event["sequence 1"] and not event["sequence 2"]:
+                name = "DELETION"
+            elif event["sequence 2"] and not event["sequence 1"]:
+                name = "INSERTION"
+            else:
+                name = "INDEL"
+            details = [{"pos": event["pos"], "k": k, "sequence 1": event["sequence 1"], "sequence 2": event["sequence 2"]}]
+            events.append((name, details))
 
         return events
 
     def collect_event_candidates(self) -> list[Tuple[str, Any]]:
-        """Collect every event candidate explaining the current sequence pair's difference.
-
-        Tries, in order: exact identity, alignment-based local events (swaps,
-        shuffles, isobaric/local-rearrangement/plain substitutions, indels detected
-        per changed run), then falls back to a coarser substitution + indel-block view
-        if the alignment-based pass found nothing.
-
-        Returns:
-            List of ``(event_name, event_details)`` candidates (possibly more than one,
-            which ``assign_multi_event_variant`` then combines into one label).
-        """
+        """Every event candidate for the sequence pair: identity, alignment-based, or indel/substitution fallback."""
         if self.sequence1 == self.sequence2:
             return [("IDENTICAL", [])]
 
@@ -122,14 +82,7 @@ class EventLabelingMixin:
         return candidates
 
     def event_positions(self, event_details: Any) -> Tuple[int, ...]:
-        """Extract every sequence position an event (or list of events) covers.
-
-        Args:
-            event_details: A single event-detail dict, or a list of them.
-
-        Returns:
-            Sorted tuple of covered 0-based positions.
-        """
+        """Sorted 0-based positions an event (or list of events) covers."""
         positions: set[int] = set()
 
         if isinstance(event_details, dict):
@@ -162,15 +115,7 @@ class EventLabelingMixin:
         }
 
     def combined_event_name(self, component_events: list[Dict[str, Any]]) -> str:
-        """Name the combination of exactly two component events, e.g. ``"SWAP + INSERTION"``.
-
-        Args:
-            component_events: Summarized candidates, as from ``summarize_candidate``.
-
-        Returns:
-            The two components' labels joined with ``" + "`` (priority-ordered), or
-            ``"MULTI_EVENT"`` if there aren't exactly two, or either isn't a dict.
-        """
+        """Name the combination of exactly two component events, e.g. "SWAP + INSERTION"; else "MULTI_EVENT"."""
         if len(component_events) != 2:
             return "MULTI_EVENT"
 
@@ -184,11 +129,7 @@ class EventLabelingMixin:
         return " + ".join(combined_names)
 
     def assign_multi_event_variant(self, candidates: list[Tuple[str, Any]]) -> None:
-        """Summarize multiple event candidates and record them as the selected combined event.
-
-        Args:
-            candidates: Event candidates, as from ``collect_event_candidates``.
-        """
+        """Summarize multiple event candidates and record them as the selected combined event."""
         component_events = [self.summarize_candidate(candidate) for candidate in candidates]
         self._debug("Assigning PSA multi-event variant: %s", component_events)
         combined_event_name = self.combined_event_name(component_events)
@@ -220,26 +161,8 @@ class EventLabelingMixin:
             return f"INS({sequence_2})@{position}"
         return f"INDEL({sequence_1}->{sequence_2})@{position}"
 
-    @staticmethod
-    def _format_shuffle_change(event_name: str, change: Dict[str, Any]) -> str:
-        """Render an adjacent-swap or block-shuffle event as e.g. ``"SWAP(AB->BA)@5"``."""
-        position = int(change["pos"]) + 1
-        sequence_1 = change.get("sequence 1", "")
-        sequence_2 = change.get("sequence 2", "")
-        action = "SWAP" if event_name == "ADJACENT_SWAP" else "SHUFFLE"
-        return f"{action}({sequence_1}->{sequence_2})@{position}"
-
     def event_change_summary(self, event_name: str, event_details: Any) -> str:
-        """Render any selected event (including combined multi-events) as a change-summary string.
-
-        Args:
-            event_name: The selected event's name (may be a ``" + "``-joined combination).
-            event_details: The selected event's details.
-
-        Returns:
-            A compact human-readable summary, e.g. ``"E7R"``, ``"INS(K)@8"``,
-            ``"SWAP(ID->DI)@5"``, or a ``" + "``-joined combination thereof.
-        """
+        """Render any selected event (incl. combined multi-events) as a summary string, e.g. "E7R", "INS(K)@8"."""
         if event_name == "IDENTICAL":
             return "NO_CHANGE"
 
@@ -254,7 +177,11 @@ class EventLabelingMixin:
             return ",".join(changes) if changes else "INDEL"
 
         if event_name in {"ADJACENT_SWAP", "BLOCK_SHUFFLE"} and isinstance(event_details, dict):
-            return self._format_shuffle_change(event_name, event_details)
+            position = int(event_details["pos"]) + 1
+            sequence_1 = event_details.get("sequence 1", "")
+            sequence_2 = event_details.get("sequence 2", "")
+            action = "SWAP" if event_name == "ADJACENT_SWAP" else "SHUFFLE"
+            return f"{action}({sequence_1}->{sequence_2})@{position}"
 
         if (event_name == "MULTI_EVENT" or " + " in event_name) and isinstance(event_details, list):
             component_changes = []
@@ -317,13 +244,7 @@ class EventLabelingMixin:
         return self._component_event_label(self.result.selected_event)
 
     def unclassified_change_summary(self) -> str:
-        """Best-effort change summary for sequence pairs no specific event rule matched.
-
-        Returns:
-            ``"NO_CHANGE"`` if identical, a joined substitution list if only
-            substitutions were observed, a single indel description if only one indel
-            block was observed, or ``"SEQUENCE_VARIANT"`` otherwise.
-        """
+        """Best-effort change summary when no specific event rule matched, else "SEQUENCE_VARIANT"."""
         if self.sequence1 == self.sequence2:
             return "NO_CHANGE"
 

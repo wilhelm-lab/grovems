@@ -19,7 +19,7 @@ DEBUG_LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
 
 
 class PSA(MassUtilsMixin, LevenshteinMixin, EventDetectionMixin, EventLabelingMixin):
-    """Classifies the difference between two peptide sequences (see module docstring)."""
+    """Classifies the difference between two peptide sequences."""
 
     _debug_handler: Optional[logging.Handler] = None
 
@@ -30,14 +30,7 @@ class PSA(MassUtilsMixin, LevenshteinMixin, EventDetectionMixin, EventLabelingMi
         *,
         debug: bool = False,
     ) -> None:
-        """Create a PSA classifier, optionally setting the sequence pair immediately.
-
-        Args:
-            sequence1: First sequence. Must be given together with ``sequence2``, or
-                left unset (call :meth:`set_sequences` later).
-            sequence2: Second sequence.
-            debug: Enable verbose debug logging of every intermediate step.
-        """
+        """Create a PSA classifier, optionally setting the sequence pair immediately (or via set_sequences later)."""
         self.result = PSAResult()
         self.debug = debug
         self.aligner = self.build_aligner()
@@ -51,51 +44,19 @@ class PSA(MassUtilsMixin, LevenshteinMixin, EventDetectionMixin, EventLabelingMi
                 raise ValueError("Provide both sequence1 and sequence2, or neither.")
             self.set_sequences(sequence1, sequence2)
 
-    def set_debug(self, enabled: bool = True) -> None:
-        """Enable or disable verbose debug logging."""
-        self.debug = enabled
-        self._debug("PSA debug logging enabled")
-
-    def enable_debug(self) -> None:
-        """Shorthand for ``set_debug(True)``."""
-        self.set_debug(True)
-
-    def disable_debug(self) -> None:
-        """Shorthand for ``set_debug(False)``."""
-        self.set_debug(False)
-
-    @classmethod
-    def _get_debug_handler(cls) -> logging.Handler:
-        if cls._debug_handler is None:
-            handler = logging.StreamHandler()
-            handler.setLevel(logging.DEBUG)
-            handler.setFormatter(logging.Formatter(DEBUG_LOG_FORMAT))
-            cls._debug_handler = handler
-        return cls._debug_handler
-
     def _debug(self, msg: str, *args: Any) -> None:
         if not self.debug:
             return
-        record = logger.makeRecord(
-            logger.name,
-            logging.DEBUG,
-            __file__,
-            0,
-            msg,
-            args,
-            None,
-        )
-        self._get_debug_handler().emit(record)
+        if PSA._debug_handler is None:
+            handler = logging.StreamHandler()
+            handler.setLevel(logging.DEBUG)
+            handler.setFormatter(logging.Formatter(DEBUG_LOG_FORMAT))
+            PSA._debug_handler = handler
+        record = logger.makeRecord(logger.name, logging.DEBUG, __file__, 0, msg, args, None)
+        PSA._debug_handler.emit(record)
 
     def set_sequences(self, sequence1: str, sequence2: str, *, reset_result: bool = True) -> None:
-        """Set the sequence pair to compare, computing their masses and resetting the result.
-
-        Args:
-            sequence1: First sequence.
-            sequence2: Second sequence.
-            reset_result: If ``True`` (default), clear any previous classification
-                result before recording the new sequence pair.
-        """
+        """Set the sequence pair to compare, computing their masses and resetting the result."""
         self.sequence1 = sequence1
         self.sequence2 = sequence2
         self.mass_1 = float(self.calculate_mass(sequence1))
@@ -118,20 +79,8 @@ class PSA(MassUtilsMixin, LevenshteinMixin, EventDetectionMixin, EventLabelingMi
             monoisotopic_mass=(self.mass_1, self.mass_2),
         )
 
-    def check_anagram(self) -> None:
-        """Set ``self.anagram`` to whether ``sequence1``/``sequence2`` are global anagrams."""
-        self.anagram = (len(self.sequence1) == len(self.sequence2)) and (
-            Counter(self.sequence1) == Counter(self.sequence2)
-        )
-
     def select_event(self, selected_event: str, event_details: Any) -> None:
-        """Record the classified event (and its details) onto ``self.result``.
-
-        Args:
-            selected_event: Event name to record as ``self.result.selected_event``.
-            event_details: Event-specific details, stored under ``selected_event`` in
-                ``self.result.details`` (skipped if ``None``).
-        """
+        """Record the classified event onto self.result (event_details stored under selected_event, if not None)."""
         self._debug(
             "PSA event selected: event=%s tier=%d lev_distance=%d isobaric=%s anagram=%s details=%s",
             selected_event,
@@ -148,11 +97,7 @@ class PSA(MassUtilsMixin, LevenshteinMixin, EventDetectionMixin, EventLabelingMi
         )
 
     def assign_similarity(self, identities: int) -> None:
-        """Score similarity from an identity count and record it (plus its coarse level).
-
-        Args:
-            identities: Number of identical aligned positions.
-        """
+        """Score similarity from an identity count and record it (plus its coarse level)."""
         normalized_identity = identities / max(len(self.sequence1), len(self.sequence2))
         divisor = len(self.sequence1) + len(self.sequence2) - identities
         jaccard = identities / divisor if divisor else 1.0
@@ -182,14 +127,9 @@ class PSA(MassUtilsMixin, LevenshteinMixin, EventDetectionMixin, EventLabelingMi
         )
 
     def tier_assignment(self) -> None:
-        """Run the full PSA rulebook: align + score similarity, assign a tier, detect the event.
-
-        In order: align the sequence pair and score their similarity; assign the PSA
-        tier from their Levenshtein distance; detect the observed event (or events)
-        and record it for reporting.
-        """
+        """Run the full PSA rulebook: align + score similarity, assign a tier, detect the event."""
         self.isobaric = self.same_mass(self.mass_1, self.mass_2)
-        self.check_anagram()
+        self.anagram = len(self.sequence1) == len(self.sequence2) and Counter(self.sequence1) == Counter(self.sequence2)
         self.result.update(isobaric=self.isobaric, anagram=self.anagram)
         self.sequence_alignment()
         self.aln_cnt = self.result.alignment.counts()
@@ -264,7 +204,3 @@ class PSA(MassUtilsMixin, LevenshteinMixin, EventDetectionMixin, EventLabelingMi
 
     def __repr__(self) -> str:
         return repr(self.result)
-
-    def clasify(self) -> None:
-        """Backwards-compatible misspelled alias for :meth:`classify`."""
-        self.classify()
