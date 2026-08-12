@@ -82,14 +82,20 @@ def run(config: GrovemsConfig) -> None:
         if not ran_psa:
             _require(config, "grove_forest_dir")
             grove_forest_dir = Path(config.grove_forest_dir)
-        logger.info("Running IForest stage")
+        iforest_output_dir = Path(config.iforest_output_dir) if config.iforest_output_dir else grove_forest_dir
+        logger.info(
+            "Running IForest stage%s",
+            f" (output: {iforest_output_dir}, input untouched)" if config.iforest_output_dir else "",
+        )
         ifr.run(
             grove_forest_dir,
             config.iforest_features,
-            grove_forest_dir / "model",
+            iforest_output_dir / "model",
             training_source=config.iforest_training_source,
             denovo_score_threshold=config.iforest_denovo_score_threshold,
+            results_output_dir=iforest_output_dir / "results",
         )
+        grove_forest_dir = iforest_output_dir
         ran_iforest = True
 
     ran_postprocess = False

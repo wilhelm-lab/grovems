@@ -93,3 +93,7 @@ iforest_denovo_score_threshold: 0.9   # only used when iforest_training_source i
 # Only needed when run_iforest is true but run_psa is false (standalone iforest run);
 # otherwise the PSA stage's own grove_forest/ output is used directly.
 grove_forest_dir: null
+# When set, IForest reads grove_forest_dir/results as input but writes scored results +
+# model here instead, leaving grove_forest_dir untouched -- for rerunning IForest with
+# different features/iforest_training_source against an existing rescoring/PSA output.
+iforest_output_dir: null

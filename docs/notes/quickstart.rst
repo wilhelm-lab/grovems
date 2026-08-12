@@ -48,6 +48,9 @@
    run's own saved ``<outdir>/config.yaml``, so already-finished work is skipped
    instead of redone.
 
+   With no database search available, use ``tutorials/run_pipeline_denovo_only.slurm``
+   instead -- it sets ``denovo_only=true`` and skips the database/PSA branches entirely.
+
    One real file, locally
    ************************
 

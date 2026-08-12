@@ -111,6 +111,13 @@ class GrovemsConfig:
     # output (or, for a postprocess-only run, the IForest stage's own output) is used
     # directly.
     grove_forest_dir: Optional[str] = None
+    # When set, IForest reads grove_forest_dir/results as input but writes scored
+    # parquet files + model into this directory instead of overwriting grove_forest_dir
+    # in place -- for rerunning IForest (e.g. a different iforest_training_source or
+    # iforest_features) against an existing rescoring/PSA output without touching it.
+    # Downstream postprocess/plotting stages, if run in the same invocation, then read
+    # from here instead of grove_forest_dir.
+    iforest_output_dir: Optional[str] = None
 
     @classmethod
     def from_yaml(cls, path: Union[str, Path]) -> "GrovemsConfig":

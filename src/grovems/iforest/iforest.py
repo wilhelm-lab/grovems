@@ -181,8 +181,13 @@ def run(
     *,
     training_source: str = "percolator_percentile",
     denovo_score_threshold: float = 0.9,
+    results_output_dir: Optional[Path] = None,
 ) -> None:
-    """Fit a SUOD model on grove_forest/results/*.parquet, then score and update those files in place."""
+    """Fit a SUOD model on grove_forest/results/*.parquet, then score those files.
+
+    Written back in place unless ``results_output_dir`` is given, in which case scored
+    copies are written there instead, leaving ``grove_forest_dir`` untouched.
+    """
     results_dir = grove_forest_dir / "results"
     files = sorted(results_dir.glob("*.parquet"))
     if not files:
@@ -209,20 +214,26 @@ def run(
     model_dir.mkdir(parents=True, exist_ok=True)
     dump(model, model_dir / "SUOD_model.pkl")
 
-    logger.info("Scoring and updating %d grove_forest file(s)", len(files))
+    output_dir = results_output_dir or results_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info("Scoring %d grove_forest file(s) into %s", len(files), output_dir)
     score_min, score_max = np.inf, -np.inf
+    output_files = []
     for path in files:
         merged_df = pd.read_parquet(path)
         score_grove_forest_file(merged_df, model, feature_cols)
         combined_scores = pd.concat([merged_df["ISO_scores_database"], merged_df["ISO_scores_denovo"]]).dropna()
         score_min = min(score_min, combined_scores.min())
         score_max = max(score_max, combined_scores.max())
-        merged_df.to_parquet(path, index=False, engine="pyarrow")
+        out_path = output_dir / path.name
+        merged_df.to_parquet(out_path, index=False, engine="pyarrow")
+        output_files.append(out_path)
 
     logger.info(
         "Rescaling ISO_scores to [0, 1] (1=good, 0=bad) across %d file(s); raw range [%.6f, %.6f]",
-        len(files),
+        len(output_files),
         score_min,
         score_max,
     )
-    _rescale_iso_scores(files, score_min, score_max)
+    _rescale_iso_scores(output_files, score_min, score_max)
