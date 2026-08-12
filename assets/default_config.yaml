@@ -82,6 +82,13 @@ iforest_features:
   - fraction_observed_but_not_predicted
   - fraction_observed_but_not_predicted_vs_predicted
   - spectral_angle
+# How the SUOD training set is picked:
+#   percolator_percentile (default) -- trusted shared PSMs (target, database-side
+#       Percolator score > 0), then the top 30% by that Percolator score.
+#   denovo_score -- PSMs with a de novo call (denovo_only or shared) whose SCORE_denovo
+#       is at least iforest_denovo_score_threshold, independent of Percolator/database.
+iforest_training_source: percolator_percentile
+iforest_denovo_score_threshold: 0.9   # only used when iforest_training_source is denovo_score
 # Only needed when run_iforest is true but run_psa is false (standalone iforest run);
 # otherwise the PSA stage's own grove_forest/ output is used directly.
 grove_forest_dir: null

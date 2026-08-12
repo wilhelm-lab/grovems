@@ -62,7 +62,13 @@ def run(config: GrovemsConfig) -> None:
             _require(config, "grove_forest_dir")
             grove_forest_dir = Path(config.grove_forest_dir)
         logger.info("Running IForest stage")
-        ifr.run(grove_forest_dir, config.iforest_features, grove_forest_dir / "model")
+        ifr.run(
+            grove_forest_dir,
+            config.iforest_features,
+            grove_forest_dir / "model",
+            training_source=config.iforest_training_source,
+            denovo_score_threshold=config.iforest_denovo_score_threshold,
+        )
         ran_iforest = True
 
     ran_postprocess = False

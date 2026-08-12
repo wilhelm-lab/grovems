@@ -79,32 +79,65 @@ def trusted_shared_mask(merged_df: pd.DataFrame) -> pd.Series:
     )
 
 
-def select_training_candidates(merged_df: pd.DataFrame) -> pd.DataFrame:
-    """Pick one file's high-confidence shared-PSM rows, before the global percentile cutoff.
+def trusted_denovo_mask(merged_df: pd.DataFrame, threshold: float) -> pd.Series:
+    """Rows counted as high-confidence de novo PSMs: has a de novo call, SCORE_denovo >= threshold.
 
-    The cheap per-file filter for pass 1 -- only :func:`trusted_shared_mask` rows are
-    candidates at all; :func:`build_training_set` applies the actual cutoff once
-    candidates from every file have been combined.
+    Alternative to :func:`trusted_shared_mask` for picking IForest's training candidates
+    when ``iforest_training_source == "denovo_score"`` -- trusts the de novo engine's own
+    per-PSM confidence instead of the database side's Percolator score. Unlike
+    :func:`trusted_shared_mask`, not restricted to ``shared`` rows: any row with a de
+    novo identification (denovo_only or shared) qualifies.
+    """
+    return merged_df["_merge"].isin(_SIDE_MERGE_VALUES["denovo"]) & pd.to_numeric(
+        merged_df["SCORE_denovo"], errors="coerce"
+    ).ge(threshold)
+
+
+def select_training_candidates(
+    merged_df: pd.DataFrame, training_source: str = "percolator_percentile", denovo_score_threshold: float = 0.9
+) -> pd.DataFrame:
+    """Pick one file's high-confidence PSM rows, before any global cutoff.
+
+    The cheap per-file filter for pass 1. With ``training_source="percolator_percentile"``
+    (default), only :func:`trusted_shared_mask` rows are candidates at all --
+    :func:`build_training_set` applies the actual percentile cutoff once candidates from
+    every file have been combined. With ``training_source="denovo_score"``, candidates are
+    already fully filtered by :func:`trusted_denovo_mask` (a literal per-row cutoff), so
+    :func:`build_training_set` just unsuffixes the columns.
     """
     base_cols = ["SpecId", "_merge"]
-    cols = base_cols + select_suffixed_search_columns(merged_df, "database", set(base_cols))
-    return merged_df.loc[trusted_shared_mask(merged_df), cols].copy()
+    if training_source == "denovo_score":
+        mask = trusted_denovo_mask(merged_df, denovo_score_threshold)
+        cols = base_cols + select_suffixed_search_columns(merged_df, "denovo", set(base_cols))
+    else:
+        mask = trusted_shared_mask(merged_df)
+        cols = base_cols + select_suffixed_search_columns(merged_df, "database", set(base_cols))
+    return merged_df.loc[mask, cols].copy()
 
 
-def build_training_set(candidates: pd.DataFrame) -> pd.DataFrame:
-    """Apply the 70th-percentile Percolator-score cutoff and unsuffix feature columns.
+def build_training_set(candidates: pd.DataFrame, training_source: str = "percolator_percentile") -> pd.DataFrame:
+    """Apply the Percolator-percentile cutoff (if applicable) and unsuffix feature columns.
 
     Args:
         candidates: Training candidates from every raw file, concatenated (see
             :func:`select_training_candidates`) -- a stricter subset than what gets
             scored later (every shared PSM, in :func:`score_grove_forest_file`).
+        training_source: ``"percolator_percentile"`` applies the 70th-percentile
+            Percolator-score cutoff before unsuffixing ``_database`` columns.
+            ``"denovo_score"`` candidates are already fully filtered, so this just
+            unsuffixes the ``_denovo`` columns.
 
     Returns:
         Unsuffixed feature matrix (plus ``SpecId``/``_merge``) for training.
     """
-    cutoff = np.percentile(candidates.percolator_score_database.to_numpy(), 70)
-    train_set = candidates.query(f"percolator_score_database > {cutoff}").copy()
-    train_set.columns = train_set.columns.str.replace("_database", "")
+    if training_source == "denovo_score":
+        train_set = candidates.copy()
+        suffix = "_denovo"
+    else:
+        cutoff = np.percentile(candidates.percolator_score_database.to_numpy(), 70)
+        train_set = candidates.query(f"percolator_score_database > {cutoff}").copy()
+        suffix = "_database"
+    train_set.columns = train_set.columns.str.replace(suffix, "")
     require_unique_columns(train_set, "training set")
     logger.info("Training set: %d rows, %d columns", train_set.shape[0], train_set.shape[1])
     return train_set
@@ -199,16 +232,35 @@ def _rescale_iso_scores(files: list[Path], score_min: float, score_max: float) -
         df.to_parquet(path, index=False, engine="pyarrow")
 
 
-def run(grove_forest_dir: Path, feature_cols: list[str], model_dir: Path) -> None:
-    """Fit a SUOD model on grove_forest/results/*.parquet, then score and update those files in place."""
+def run(
+    grove_forest_dir: Path,
+    feature_cols: list[str],
+    model_dir: Path,
+    *,
+    training_source: str = "percolator_percentile",
+    denovo_score_threshold: float = 0.9,
+) -> None:
+    """Fit a SUOD model on grove_forest/results/*.parquet, then score and update those files in place.
+
+    Args:
+        grove_forest_dir: Directory containing ``results/*.parquet``.
+        feature_cols: SUOD feature columns to train/score on.
+        model_dir: Where to write the fitted model.
+        training_source: ``"percolator_percentile"`` (default) or ``"denovo_score"`` --
+            see :func:`select_training_candidates`/:func:`build_training_set`.
+        denovo_score_threshold: Minimum ``SCORE_denovo`` for a row to enter the training
+            set; only used when ``training_source == "denovo_score"``.
+    """
     results_dir = grove_forest_dir / "results"
     files = sorted(results_dir.glob("*.parquet"))
     if not files:
         raise ValueError(f"No grove_forest parquet files found in {results_dir}")
 
-    logger.info("Gathering SUOD training candidates from %d file(s)", len(files))
-    candidates = [select_training_candidates(pd.read_parquet(path)) for path in files]
-    train_set = build_training_set(pd.concat(candidates, ignore_index=True))
+    logger.info("Gathering SUOD training candidates from %d file(s) (source=%s)", len(files), training_source)
+    candidates = [
+        select_training_candidates(pd.read_parquet(path), training_source, denovo_score_threshold) for path in files
+    ]
+    train_set = build_training_set(pd.concat(candidates, ignore_index=True), training_source)
     del candidates
 
     logger.info("Training SUOD model on %d rows", len(train_set))

@@ -95,6 +95,15 @@ class GrovemsConfig:
     # SUOD feature columns to train/score on -- inlined here rather than a separate
     # config_train.yaml file.
     iforest_features: list[str] = dataclasses.field(default_factory=list)
+    # How the SUOD training set is picked (see grovems.iforest.select_training_candidates):
+    #   "percolator_percentile" (default) -- trusted shared PSMs (target, database-side
+    #       Percolator score > 0), then the top 30% by that Percolator score.
+    #   "denovo_score" -- PSMs with a de novo call (denovo_only or shared) whose
+    #       SCORE_denovo is at least iforest_denovo_score_threshold, independent of
+    #       anything Percolator/database-side.
+    iforest_training_source: str = "percolator_percentile"
+    # Only used when iforest_training_source == "denovo_score".
+    iforest_denovo_score_threshold: float = 0.9
     # Only needed when run_iforest and/or run_postprocess are true but run_psa is false
     # (standalone iforest/postprocess run); otherwise the PSA stage's own grove_forest/
     # output (or, for a postprocess-only run, the IForest stage's own output) is used
