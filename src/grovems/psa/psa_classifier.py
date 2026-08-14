@@ -4,6 +4,8 @@ import logging
 from collections import Counter
 from typing import Any, Optional
 
+from Bio import Align
+
 from .psa_event_detection import EventDetectionMixin
 from .psa_event_labeling import EventLabelingMixin
 from .psa_levenshtein import LevenshteinMixin
@@ -33,7 +35,12 @@ class PSA(MassUtilsMixin, LevenshteinMixin, EventDetectionMixin, EventLabelingMi
         """Create a PSA classifier, optionally setting the sequence pair immediately (or via set_sequences later)."""
         self.result = PSAResult()
         self.debug = debug
-        self.aligner = self.build_aligner()
+        self.aligner = Align.PairwiseAligner()
+        self.aligner.mode = "global"
+        self.aligner.match_score = 1.0
+        self.aligner.mismatch_score = 0.0
+        self.aligner.open_gap_score = -1.0
+        self.aligner.extend_gap_score = -1.0
         self.sequence1: Optional[str] = None
         self.mass_1: Optional[float] = None
         self.sequence2: Optional[str] = None
@@ -102,8 +109,11 @@ class PSA(MassUtilsMixin, LevenshteinMixin, EventDetectionMixin, EventLabelingMi
         self.isobaric = self.same_mass(self.mass_1, self.mass_2)
         self.anagram = len(self.sequence1) == len(self.sequence2) and Counter(self.sequence1) == Counter(self.sequence2)
         self.result.update(isobaric=self.isobaric, anagram=self.anagram)
-        self.sequence_alignment()
-        self.aln_cnt = self.result.alignment.counts()
+
+        aln = self.aligner.align(self.sequence1, self.sequence2)[0]
+        self.result.update(alignment=aln)
+        self.aln_cnt = aln.counts()
+
         levenshtein_distance = self.levenshtein_distance(self.sequence1, self.sequence2)
         final_tier = self.levenshtein_tier(levenshtein_distance)
         observed_changes = self.collect_observed_changes()

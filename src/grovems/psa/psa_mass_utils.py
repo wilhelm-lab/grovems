@@ -29,7 +29,10 @@ class MassUtilsMixin:
         return float(sum(AA_MOD[aa] for aa in sequence))
 
     @staticmethod
-    def same_mass(mass_1: float, mass_2: float, *, ppm: float = ISOBARIC_MASS_TOLERANCE_PPM) -> bool:
-        """Whether two masses are equal within ``ppm`` relative tolerance."""
+    def same_mass(
+        mass_1: float, mass_2: float, *, ppm: float = ISOBARIC_MASS_TOLERANCE_PPM, min_tolerance_da: float = 0.0
+    ) -> bool:
+        """Whether two masses are equal within ``ppm`` relative tolerance, or ``min_tolerance_da`` if looser."""
         reference_mass = max(abs(mass_1), abs(mass_2), 1.0)
-        return abs(mass_1 - mass_2) <= reference_mass * ppm * 1e-6
+        tolerance = max(reference_mass * ppm * 1e-6, min_tolerance_da)
+        return abs(mass_1 - mass_2) <= tolerance

@@ -31,7 +31,9 @@ def add_sequence_match_columns(df: pd.DataFrame) -> None:
         return
 
     df["unmodified_sequence_match"] = (
-        df["SEQUENCE_database"].notna() & df["SEQUENCE_denovo"].notna() & df["SEQUENCE_database"].eq(df["SEQUENCE_denovo"])
+        df["SEQUENCE_database"].notna()
+        & df["SEQUENCE_denovo"].notna()
+        & df["SEQUENCE_database"].eq(df["SEQUENCE_denovo"])
     )
 
     modified_columns = ["MODIFIED_SEQUENCE_database", "MODIFIED_SEQUENCE_denovo"]
@@ -48,7 +50,9 @@ def add_sequence_match_columns(df: pd.DataFrame) -> None:
     if set(charge_columns).issubset(df.columns):
         database_charge = pd.to_numeric(df["PRECURSOR_CHARGE_database"], errors="coerce")
         denovo_charge = pd.to_numeric(df["PRECURSOR_CHARGE_denovo"], errors="coerce")
-        df["precursor_charge_match"] = database_charge.notna() & denovo_charge.notna() & database_charge.eq(denovo_charge)
+        df["precursor_charge_match"] = (
+            database_charge.notna() & denovo_charge.notna() & database_charge.eq(denovo_charge)
+        )
     else:
         df["precursor_charge_match"] = False
 
@@ -109,7 +113,9 @@ def _merge_search_results(merged_database: pd.DataFrame, merged_denovo: pd.DataF
 
     add_sequence_match_columns(merged)
 
-    merged["_merge"] = merged["_merge"].map({"right_only": "denovo_only", "left_only": "database_only", "both": "shared"})
+    merged["_merge"] = merged["_merge"].map(
+        {"right_only": "denovo_only", "left_only": "database_only", "both": "shared"}
+    )
     return merged
 
 
@@ -137,7 +143,9 @@ def _run_psa_for_pairs(sequences_database: pd.Series, sequences_denovo: pd.Serie
     with ProcessPoolExecutor(max_workers=n_workers, initializer=_init_psa_worker) as executor:
         rows = list(
             tqdm(
-                executor.map(_run_psa_pair, sequences_database.tolist(), sequences_denovo.tolist(), chunksize=chunksize),
+                executor.map(
+                    _run_psa_pair, sequences_database.tolist(), sequences_denovo.tolist(), chunksize=chunksize
+                ),
                 total=len(sequences_database),
                 desc="Running PSA",
             )
@@ -162,7 +170,9 @@ def _add_psa_columns(merged_scan: pd.DataFrame) -> None:
     merged_scan["PSA_ERROR"] = None
 
     shared_mask = (
-        merged_scan["_merge"].eq("shared") & merged_scan["SEQUENCE_database"].notna() & merged_scan["SEQUENCE_denovo"].notna()
+        merged_scan["_merge"].eq("shared")
+        & merged_scan["SEQUENCE_database"].notna()
+        & merged_scan["SEQUENCE_denovo"].notna()
     )
     same_sequence_mask = shared_mask & merged_scan["sequence_match"]
     different_sequence_mask = shared_mask & ~merged_scan["sequence_match"]
@@ -214,7 +224,7 @@ def run(
     lives in ``grove_forest_dir/results``.
     """
     global PSA_MAX_WORKERS
-    PSA_MAX_WORKERS = max_workers or os.cpu_count() or 1
+    PSA_MAX_WORKERS = max_workers or 1
     results_dir = grove_forest_dir / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
 

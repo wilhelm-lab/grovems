@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import logging
-from typing import Any, Dict, Optional, Tuple
-
-logger = logging.getLogger(__name__)
+from typing import Any, Dict, Tuple
 
 MAX_MULTI_AA_INDEL_SIZE = 3
 
@@ -22,31 +19,24 @@ class EventLabelingMixin:
             return observed
         return self.collect_observed_changes()
 
-    def substitution_event(
-        self,
-        observed_changes: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Tuple[str, list[Dict[str, Any]]]]:
-        """Build a ``SUBSTITUTION`` event from every observed substitution, or None if there were none."""
-        observed = observed_changes if observed_changes is not None else self.observed_changes()
-        substitutions = observed["substitutions"]
-        if not substitutions:
-            return None
+    def _levenshtein_fallback_events(self, observed_changes: Dict[str, Any]) -> list[Tuple[str, Any]]:
+        """Substitution + indel events built from the raw Levenshtein edit trace.
 
-        details = [{"pos": sub["pos"], "from": sub["from"], "to": sub["to"]} for sub in substitutions]
-        return ("SUBSTITUTION", details)
+        Only used when the alignment-based search (local_alignment_events_for) finds
+        nothing at all -- essentially never happens for differing sequences, since
+        Biopython's alignment always produces at least one changed run.
+        """
+        events: list[Tuple[str, Any]] = []
 
-    def indel_events(
-        self,
-        observed_changes: Optional[Dict[str, Any]] = None,
-    ) -> list[Tuple[str, list[Dict[str, Any]]]]:
-        """One event per grouped indel block up to MAX_MULTI_AA_INDEL_SIZE residues, ordered by position."""
-        observed = observed_changes if observed_changes is not None else self.observed_changes()
+        substitutions = observed_changes["substitutions"]
+        if substitutions:
+            details = [{"pos": sub["pos"], "from": sub["from"], "to": sub["to"]} for sub in substitutions]
+            events.append(("SUBSTITUTION", details))
+
         indel_blocks = sorted(
-            observed["insertions"] + observed["deletions"],
+            observed_changes["insertions"] + observed_changes["deletions"],
             key=lambda event: (int(event["pos"]), 0 if event["sequence 1"] else 1),
         )
-
-        events: list[Tuple[str, list[Dict[str, Any]]]] = []
         for event in indel_blocks:
             k = int(event["k"])
             if k < 1 or k > MAX_MULTI_AA_INDEL_SIZE:
@@ -58,7 +48,9 @@ class EventLabelingMixin:
                 name = "INSERTION"
             else:
                 name = "INDEL"
-            details = [{"pos": event["pos"], "k": k, "sequence 1": event["sequence 1"], "sequence 2": event["sequence 2"]}]
+            details = [
+                {"pos": event["pos"], "k": k, "sequence 1": event["sequence 1"], "sequence 2": event["sequence 2"]}
+            ]
             events.append((name, details))
 
         return events
@@ -72,14 +64,7 @@ class EventLabelingMixin:
         if candidates:
             return candidates
 
-        observed_changes = self.observed_changes()
-        substitution_event = self.substitution_event(observed_changes=observed_changes)
-        if substitution_event is not None:
-            candidates.append(substitution_event)
-
-        candidates.extend(self.indel_events(observed_changes=observed_changes))
-
-        return candidates
+        return self._levenshtein_fallback_events(self.observed_changes())
 
     def event_positions(self, event_details: Any) -> Tuple[int, ...]:
         """Sorted 0-based positions an event (or list of events) covers."""
@@ -114,25 +99,23 @@ class EventLabelingMixin:
             "details": event_details,
         }
 
-    def combined_event_name(self, component_events: list[Dict[str, Any]]) -> str:
-        """Name the combination of exactly two component events, e.g. "SWAP + INSERTION"; else "MULTI_EVENT"."""
-        if len(component_events) != 2:
-            return "MULTI_EVENT"
-
-        combined_names = []
-        for component in component_events:
-            if not isinstance(component, dict):
-                return "MULTI_EVENT"
-            combined_names.append(self._component_event_label(str(component.get("event", ""))))
-
-        combined_names.sort(key=self._label_name_priority)
-        return " + ".join(combined_names)
-
     def assign_multi_event_variant(self, candidates: list[Tuple[str, Any]]) -> None:
-        """Summarize multiple event candidates and record them as the selected combined event."""
+        """Summarize multiple event candidates and record them as the selected combined event.
+
+        Exactly two components get a compact combined name, e.g. "SWAP + INSERTION",
+        ordered by _label_name_priority; three or more collapse to "MULTI_EVENT".
+        """
         component_events = [self.summarize_candidate(candidate) for candidate in candidates]
         self._debug("Assigning PSA multi-event variant: %s", component_events)
-        combined_event_name = self.combined_event_name(component_events)
+
+        combined_event_name = "MULTI_EVENT"
+        if len(component_events) == 2 and all(isinstance(component, dict) for component in component_events):
+            combined_names = [
+                self._component_event_label(str(component.get("event", ""))) for component in component_events
+            ]
+            combined_names.sort(key=self._label_name_priority)
+            combined_event_name = " + ".join(combined_names)
+
         self.select_event(combined_event_name, component_events)
         self.result.update(
             component_events=component_events,
@@ -141,7 +124,7 @@ class EventLabelingMixin:
 
     @staticmethod
     def _format_substitution_change(change: Dict[str, Any]) -> str:
-        """Render one substitution as e.g. ``"E7R"`` or ``"SUB(AB->BA)@5"`` for multi-residue blocks."""
+        """Render one substitution as e.g. ``"SUB(AB->BA)@5"`` for multi-residue blocks."""
         if "sequence 1" in change or "sequence 2" in change:
             position = int(change["pos"]) + 1
             sequence_1 = change.get("sequence 1", "")
@@ -162,13 +145,16 @@ class EventLabelingMixin:
         return f"INDEL({sequence_1}->{sequence_2})@{position}"
 
     def event_change_summary(self, event_name: str, event_details: Any) -> str:
-        """Render any selected event (incl. combined multi-events) as a summary string, e.g. "E7R", "INS(K)@8"."""
+        """Render any selected event (incl. combined multi-events) as a summary string, e.g."INS(K)@8"."""
         if event_name == "IDENTICAL":
             return "NO_CHANGE"
 
-        if event_name in {"SUBSTITUTION", "ISOBARIC-SUBSTITUTION", "LOCAL-REARRANGEMENT"} and isinstance(
-            event_details, list
-        ):
+        if event_name in {
+            "SUBSTITUTION",
+            "ISOBARIC-SUBSTITUTION",
+            "N-TERM-MISMATCH",
+            "C-TERM-MISMATCH",
+        } and isinstance(event_details, list):
             changes = [self._format_substitution_change(change) for change in event_details if isinstance(change, dict)]
             return ",".join(changes) if changes else event_name
 
@@ -206,8 +192,6 @@ class EventLabelingMixin:
             return "SUBSTITUTION"
         if event_name == "ISOBARIC-SUBSTITUTION":
             return "ISOBARIC-SUBSTITUTION"
-        if event_name == "LOCAL-REARRANGEMENT":
-            return "LOCAL-REARRANGEMENT"
         if event_name in {"INSERTION", "DELETION"}:
             return event_name
         if event_name == "INDEL":
@@ -224,15 +208,16 @@ class EventLabelingMixin:
     def _label_name_priority(label_name: str) -> int:
         """Sort key controlling the order of components in a combined event name."""
         order = {
+            "N-TERM-MISMATCH": -2,
+            "C-TERM-MISMATCH": -1,
             "IDENTICAL": 0,
             "SWAP": 1,
             "SHUFFLE": 2,
             "ISOBARIC-SUBSTITUTION": 3,
-            "LOCAL-REARRANGEMENT": 4,
-            "SUBSTITUTION": 5,
-            "DELETION": 6,
-            "INSERTION": 7,
-            "INDEL": 8,
+            "SUBSTITUTION": 4,
+            "DELETION": 5,
+            "INSERTION": 6,
+            "INDEL": 7,
         }
         return order.get(label_name, 99)
 
