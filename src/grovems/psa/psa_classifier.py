@@ -5,6 +5,7 @@ from collections import Counter
 from typing import Any, Optional
 
 from Bio import Align
+from rapidfuzz.distance import Levenshtein
 
 from .psa_event_detection import EventDetectionMixin
 from .psa_event_labeling import EventLabelingMixin
@@ -114,7 +115,7 @@ class PSA(MassUtilsMixin, LevenshteinMixin, EventDetectionMixin, EventLabelingMi
         self.result.update(alignment=aln)
         self.aln_cnt = aln.counts()
 
-        levenshtein_distance = self.levenshtein_distance(self.sequence1, self.sequence2)
+        levenshtein_distance = Levenshtein.distance(self.sequence1, self.sequence2)
         final_tier = self.levenshtein_tier(levenshtein_distance)
         observed_changes = self.collect_observed_changes()
         self.result.update(

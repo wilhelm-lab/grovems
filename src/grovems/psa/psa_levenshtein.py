@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import logging
 from typing import Any, Dict, Tuple
-
-logger = logging.getLogger(__name__)
 
 LEVENSHTEIN_TIER_THRESHOLDS: Tuple[Tuple[int, int], ...] = (
     (4, 1),
@@ -14,33 +11,7 @@ LEVENSHTEIN_TIER_THRESHOLDS: Tuple[Tuple[int, int], ...] = (
 
 
 class LevenshteinMixin:
-    """Edit distance, PSA tier assignment, and edit-operation tracing between two sequences."""
-
-    @staticmethod
-    def levenshtein_distance(sequence1: str, sequence2: str) -> int:
-        """Minimum single-residue insertions/deletions/substitutions to turn sequence1 into sequence2."""
-        if sequence1 == sequence2:
-            return 0
-        if not sequence1:
-            return len(sequence2)
-        if not sequence2:
-            return len(sequence1)
-
-        previous_row = list(range(len(sequence2) + 1))
-        for i, aa1 in enumerate(sequence1, start=1):
-            current_row = [i]
-            for j, aa2 in enumerate(sequence2, start=1):
-                substitution_cost = 0 if aa1 == aa2 else 1
-                current_row.append(
-                    min(
-                        previous_row[j] + 1,
-                        current_row[j - 1] + 1,
-                        previous_row[j - 1] + substitution_cost,
-                    )
-                )
-            previous_row = current_row
-
-        return previous_row[-1]
+    """PSA tier assignment and edit-operation tracing between two sequences."""
 
     @staticmethod
     def levenshtein_tier(distance: int) -> int:
