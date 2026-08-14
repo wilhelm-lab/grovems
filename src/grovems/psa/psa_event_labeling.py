@@ -2,69 +2,21 @@ from __future__ import annotations
 
 from typing import Any, Dict, Tuple
 
-MAX_MULTI_AA_INDEL_SIZE = 3
-
 
 class EventLabelingMixin:
     """Event-candidate collection, combination, and human-readable labeling/summaries."""
 
-    def collect_observed_changes(self) -> Dict[str, Any]:
-        """``collect_observed_changes_for_sequences`` for ``self.sequence1``/``self.sequence2``."""
-        return self.collect_observed_changes_for_sequences(self.sequence1, self.sequence2)
-
-    def observed_changes(self) -> Dict[str, Any]:
-        """Cached (or freshly computed) observed-changes dict for the current sequence pair."""
-        observed = self.result.details.get("observed_changes")
-        if isinstance(observed, dict):
-            return observed
-        return self.collect_observed_changes()
-
-    def _levenshtein_fallback_events(self, observed_changes: Dict[str, Any]) -> list[Tuple[str, Any]]:
-        """Substitution + indel events built from the raw Levenshtein edit trace.
-
-        Only used when the alignment-based search (local_alignment_events_for) finds
-        nothing at all -- essentially never happens for differing sequences, since
-        Biopython's alignment always produces at least one changed run.
-        """
-        events: list[Tuple[str, Any]] = []
-
-        substitutions = observed_changes["substitutions"]
-        if substitutions:
-            details = [{"pos": sub["pos"], "from": sub["from"], "to": sub["to"]} for sub in substitutions]
-            events.append(("SUBSTITUTION", details))
-
-        indel_blocks = sorted(
-            observed_changes["insertions"] + observed_changes["deletions"],
-            key=lambda event: (int(event["pos"]), 0 if event["sequence 1"] else 1),
-        )
-        for event in indel_blocks:
-            k = int(event["k"])
-            if k < 1 or k > MAX_MULTI_AA_INDEL_SIZE:
-                continue
-
-            if event["sequence 1"] and not event["sequence 2"]:
-                name = "DELETION"
-            elif event["sequence 2"] and not event["sequence 1"]:
-                name = "INSERTION"
-            else:
-                name = "INDEL"
-            details = [
-                {"pos": event["pos"], "k": k, "sequence 1": event["sequence 1"], "sequence 2": event["sequence 2"]}
-            ]
-            events.append((name, details))
-
-        return events
-
     def collect_event_candidates(self) -> list[Tuple[str, Any]]:
-        """Every event candidate for the sequence pair: identity, alignment-based, or indel/substitution fallback."""
+        """Every event candidate for the sequence pair: identity, or every changed run from the aligner.
+
+        local_alignment_events_for always returns at least one event for a differing pair
+        (proven: a run is guaranteed to exist for any changed column not claimed by a
+        priority window), so there's no fallback branch to fall through to here.
+        """
         if self.sequence1 == self.sequence2:
             return [("IDENTICAL", [])]
 
-        candidates = self.local_alignment_events_for(self.sequence1, self.sequence2)
-        if candidates:
-            return candidates
-
-        return self._levenshtein_fallback_events(self.observed_changes())
+        return self.local_alignment_events_for(self.sequence1, self.sequence2)
 
     def event_positions(self, event_details: Any) -> Tuple[int, ...]:
         """Sorted 0-based positions an event (or list of events) covers."""
@@ -180,9 +132,6 @@ class EventLabelingMixin:
             summarized = [change for change in component_changes if change]
             return " + ".join(summarized) if summarized else "MULTI_EVENT"
 
-        if event_name == "UNCLASSIFIED_VARIANT":
-            return self.unclassified_change_summary()
-
         return event_name
 
     @staticmethod
@@ -227,20 +176,3 @@ class EventLabelingMixin:
             return self.result.selected_event
 
         return self._component_event_label(self.result.selected_event)
-
-    def unclassified_change_summary(self) -> str:
-        """Best-effort change summary when no specific event rule matched, else "SEQUENCE_VARIANT"."""
-        if self.sequence1 == self.sequence2:
-            return "NO_CHANGE"
-
-        observed = self.observed_changes()
-        substitutions = observed["substitutions"]
-        indels = observed["insertions"] + observed["deletions"]
-
-        if substitutions and not indels:
-            return ",".join(self._format_substitution_change(change) for change in substitutions)
-
-        if len(indels) == 1 and not substitutions:
-            return self._format_indel_change(indels[0])
-
-        return "SEQUENCE_VARIANT"

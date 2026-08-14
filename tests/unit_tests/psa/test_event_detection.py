@@ -33,6 +33,14 @@ def test_near_isobaric_substitution():
     assert psa.result.selected_event == "ISOBARIC-SUBSTITUTION"
 
 
+def test_exact_isobaric_substitution_unequal_residue_count():
+    # GG <-> N: classic exactly-isobaric compound substitution, needs a 2-column window
+    # (one real mismatch column + one gap column) since the two sides differ in length.
+    psa = _classify("PEPTGGEK", "PEPTNEK")
+    assert psa.result.selected_event == "ISOBARIC-SUBSTITUTION"
+    assert psa.result.details["change_summary"] == "SUB(GG->N)@5"
+
+
 def test_plain_substitution():
     psa = _classify("PEPTIDEK", "PEPTQDEK")
     assert psa.result.selected_event == "SUBSTITUTION"

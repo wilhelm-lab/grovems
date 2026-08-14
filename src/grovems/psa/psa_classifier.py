@@ -104,7 +104,6 @@ class PSA(MassUtilsMixin, LevenshteinMixin, EventDetectionMixin, EventLabelingMi
             **({selected_event: event_details} if event_details is not None else {}),
         )
 
-
     def tier_assignment(self) -> None:
         """Run the full PSA rulebook: align + score similarity, assign a tier, detect the event."""
         self.isobaric = self.same_mass(self.mass_1, self.mass_2)
@@ -117,7 +116,6 @@ class PSA(MassUtilsMixin, LevenshteinMixin, EventDetectionMixin, EventLabelingMi
 
         levenshtein_distance = Levenshtein.distance(self.sequence1, self.sequence2)
         final_tier = self.levenshtein_tier(levenshtein_distance)
-        observed_changes = self.collect_observed_changes()
         self.result.update(
             tier=final_tier,
             levenshtein_distance=levenshtein_distance,
@@ -127,7 +125,6 @@ class PSA(MassUtilsMixin, LevenshteinMixin, EventDetectionMixin, EventLabelingMi
                 "mismatches": self.aln_cnt.mismatches,
                 "gaps": self.aln_cnt.gaps,
             },
-            observed_changes=observed_changes,
         )
         self._debug(
             "Starting PSA tier assignment: seq1=%s seq2=%s isobaric=%s anagram=%s " "lev_distance=%d final_tier=%d",
@@ -140,20 +137,13 @@ class PSA(MassUtilsMixin, LevenshteinMixin, EventDetectionMixin, EventLabelingMi
         )
 
         raw_candidates = self.collect_event_candidates()
-        if raw_candidates:
-            self.result.update(
-                raw_candidate_events=[self.summarize_candidate(candidate) for candidate in raw_candidates]
-            )
+        self.result.update(raw_candidate_events=[self.summarize_candidate(candidate) for candidate in raw_candidates])
 
-            if len(raw_candidates) == 1:
-                selected_event, event_details = raw_candidates[0]
-                self.select_event(selected_event, event_details)
-            else:
-                self.assign_multi_event_variant(raw_candidates)
-            return
-
-        self.select_event("UNCLASSIFIED_VARIANT", None)
-        self._debug("No explicit event matched; keeping Levenshtein-based tier with unclassified event")
+        if len(raw_candidates) == 1:
+            selected_event, event_details = raw_candidates[0]
+            self.select_event(selected_event, event_details)
+        else:
+            self.assign_multi_event_variant(raw_candidates)
 
     def classify(self) -> None:
         """Run :meth:`tier_assignment` and build the final PSA label/change summary."""

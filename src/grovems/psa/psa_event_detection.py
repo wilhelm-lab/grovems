@@ -3,12 +3,24 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any, Dict, Optional, Tuple
 
-MAX_SHUFFLE_WINDOW_LENGTH = 5
+MAX_EVENT_WINDOW_LENGTH = 5
 LOCAL_ISOBARIC_MASS_TOLERANCE_DA = 0.04
+
+# Searched shortest-window-first: each has a fixed, exact shape (2 residues for a swap, 3-4
+# for a shuffle, or a strict mass match for isobaric), so the first/smallest match found is
+# already the correct one -- there's nothing to gain from preferring a larger window.
+_SHORTEST_FIRST_TIERS = ("ADJACENT_SWAP", "BLOCK_SHUFFLE", "ISOBARIC-SUBSTITUTION")
+# Searched longest-window-first: these have no fixed shape (anything non-identical qualifies),
+# so the search must prefer the largest natural block to avoid fragmenting e.g. one real
+# 3-residue substitution into three separate 1-residue ones.
+_LONGEST_FIRST_TIERS = ("SUBSTITUTION", "DELETION", "INSERTION")
+# ADJACENT_SWAP/BLOCK_SHUFFLE carry their details as a single dict everywhere (event_change_summary,
+# _find_priority_window's callers); every other event type carries a [dict] list.
+_DICT_SHAPED_EVENTS = {"ADJACENT_SWAP", "BLOCK_SHUFFLE"}
 
 
 class EventDetectionMixin:
-    """Pairwise alignment and per-block event-candidate detection."""
+    """Pairwise alignment and per-window event detection."""
 
     @staticmethod
     def _alignment_columns_for(sequence1: str, sequence2: str, alignment: Any) -> list[Dict[str, Any]]:
@@ -52,35 +64,15 @@ class EventDetectionMixin:
             "alignment_indices": [column["alignment_idx"] for column in columns],
         }
 
-    def local_event_from_columns(self, columns: list[Dict[str, Any]]) -> Tuple[str, Any]:
-        """Classify one changed run of columns (always non-empty -- see local_alignment_events_for) into a named event.
-
-        Never itself matches SWAP/SHUFFLE -- local_alignment_events_for's repeated
-        _find_priority_window search already tried every window (including this run's own
-        span) before falling back to per-run classification, so those checks here would
-        always be redundant (confirmed empirically, 0/30000 random trials).
-        """
-        details = self._block_details(columns)
-        block_sequence1, block_sequence2 = details["sequence 1"], details["sequence 2"]
-
-        if block_sequence1 and not block_sequence2:
-            return ("DELETION", [details])
-        if block_sequence2 and not block_sequence1:
-            return ("INSERTION", [details])
-
-        isobaric_block = self._detect_isobaric_block(columns)
-        if isobaric_block is not None:
-            return ("ISOBARIC-SUBSTITUTION", [isobaric_block])
-
-        return ("SUBSTITUTION", [details])
-
     def local_alignment_events_for(self, sequence1: str, sequence2: str) -> list[Tuple[str, Any]]:
-        """Align two sequences and classify every changed run into an event.
+        """Align two sequences and repeatedly pull the next highest-priority event out of it.
 
-        Keeps searching for priority (swap/shuffle/isobaric) windows on whatever's left
-        after each one found -- a single search would only ever catch the first of two
-        independent ones in one pair, leaving the second to fragment into unrelated
-        DELETION+SUBSTITUTION+INSERTION pieces.
+        _find_priority_window already searches the whole column list, so this just keeps
+        asking it for the next event on whatever's left (blacklisting each one's columns)
+        until nothing more is found. SUBSTITUTION/DELETION/INSERTION are themselves part of
+        that same priority search (as the lowest-priority, catch-all tiers), so every changed
+        column is guaranteed to eventually be claimed by something -- there's no separate
+        leftover-handling step.
         """
         alignment = self.aligner.align(sequence1, sequence2)[0]
         columns = self._alignment_columns_for(sequence1, sequence2, alignment)
@@ -90,33 +82,16 @@ class EventDetectionMixin:
             return terminal_events
 
         consumed: set[int] = set()
-        priority_events: list[Tuple[str, Any]] = []
+        events: list[Tuple[str, Any]] = []
         while True:
             remaining = [column for column in columns if column["alignment_idx"] not in consumed]
-            priority_event = self._find_priority_window(remaining)
-            if priority_event is None:
+            found = self._find_priority_window(remaining)
+            if found is None:
                 break
-            priority_events.append(priority_event)
-            consumed |= set(priority_event[1]["alignment_indices"])
+            name, details = found
+            events.append((name, details if name in _DICT_SHAPED_EVENTS else [details]))
+            consumed |= set(details["alignment_indices"])
 
-        changed_runs: list[list[Dict[str, Any]]] = []
-        current_run: list[Dict[str, Any]] = []
-        for column in columns:
-            if column["seq1_aa"] == column["seq2_aa"] or column["alignment_idx"] in consumed:
-                if current_run:
-                    changed_runs.append(current_run)
-                    current_run = []
-                continue
-            current_run.append(column)
-        if current_run:
-            changed_runs.append(current_run)
-
-        # ISOBARIC-SUBSTITUTION carries its details as a [dict] list everywhere else (see
-        # local_event_from_columns/event_change_summary); ADJACENT_SWAP/BLOCK_SHUFFLE stay dicts.
-        events: list[Tuple[str, Any]] = [
-            (name, [details] if name == "ISOBARIC-SUBSTITUTION" else details) for name, details in priority_events
-        ]
-        events.extend(self.local_event_from_columns(changed_run) for changed_run in changed_runs)
         return events
 
     @classmethod
@@ -217,19 +192,66 @@ class EventDetectionMixin:
         }
 
     @classmethod
-    def _find_priority_window(cls, columns: list[Dict[str, Any]]) -> Optional[Tuple[str, Dict[str, Any]]]:
-        """First SWAP, then SHUFFLE, then ISOBARIC-SUBSTITUTION found scanning every sliding
-        window of length 2..MAX_SHUFFLE_WINDOW_LENGTH -- each type is searched for across the
-        *whole* column list before falling back to the next, so e.g. a swap anywhere always
-        wins over a shuffle anywhere, matching the SWAP > SHUFFLE > ISOBARIC-SUBSTITUTION
-        priority used elsewhere (event_change_summary's ordering, _label_name_priority).
+    def _detect_substitution_block(cls, columns: list[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Detect a block with real content on both sides and no embedded match column.
+
+        Catch-all for whatever isn't a swap/shuffle/isobaric match -- gap columns are fine
+        within the block (that's how a compound substitution like D->QQ or K->GA is
+        represented), but a true match column would mean merging two unrelated changes
+        across an untouched residue, so that's rejected.
         """
-        for name, detect in (
-            ("ADJACENT_SWAP", cls._detect_direct_adjacent_swap),
-            ("BLOCK_SHUFFLE", cls._detect_shuffle),
-            ("ISOBARIC-SUBSTITUTION", cls._detect_isobaric_block),
+        if any(column["seq1_aa"] == column["seq2_aa"] for column in columns):
+            return None
+        details = cls._block_details(columns)
+        if details["sequence 1"] and details["sequence 2"]:
+            return details
+        return None
+
+    @classmethod
+    def _detect_deletion_block(cls, columns: list[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Detect a block that's pure deletion: real seq1 content throughout, no seq2 content at all."""
+        details = cls._block_details(columns)
+        if details["sequence 1"] and not details["sequence 2"]:
+            return details
+        return None
+
+    @classmethod
+    def _detect_insertion_block(cls, columns: list[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Detect a block that's pure insertion: real seq2 content throughout, no seq1 content at all."""
+        details = cls._block_details(columns)
+        if details["sequence 2"] and not details["sequence 1"]:
+            return details
+        return None
+
+    @classmethod
+    def _find_priority_window(cls, columns: list[Dict[str, Any]]) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """The single highest-priority event found anywhere in columns.
+
+        Tries every sliding window of length 1..MAX_EVENT_WINDOW_LENGTH for each event type in
+        turn -- ADJACENT_SWAP, then BLOCK_SHUFFLE, then ISOBARIC-SUBSTITUTION, then SUBSTITUTION,
+        then DELETION, then INSERTION (matching _label_name_priority) -- searching the *whole*
+        column list for one type before moving to the next, so e.g. any swap anywhere always
+        wins over any shuffle anywhere. The first three have a fixed shape and are searched
+        shortest-window-first; the last three are open-ended catch-alls and are searched
+        longest-window-first so a natural multi-residue block isn't fragmented into several
+        1-residue events.
+        """
+        detectors = {
+            "ADJACENT_SWAP": cls._detect_direct_adjacent_swap,
+            "BLOCK_SHUFFLE": cls._detect_shuffle,
+            "ISOBARIC-SUBSTITUTION": cls._detect_isobaric_block,
+            "SUBSTITUTION": cls._detect_substitution_block,
+            "DELETION": cls._detect_deletion_block,
+            "INSERTION": cls._detect_insertion_block,
+        }
+        max_length = min(len(columns), MAX_EVENT_WINDOW_LENGTH)
+
+        for name, window_lengths in (
+            *((name, range(1, max_length + 1)) for name in _SHORTEST_FIRST_TIERS),
+            *((name, range(max_length, 0, -1)) for name in _LONGEST_FIRST_TIERS),
         ):
-            for window_length in range(2, min(len(columns), MAX_SHUFFLE_WINDOW_LENGTH) + 1):
+            detect = detectors[name]
+            for window_length in window_lengths:
                 for start in range(len(columns) - window_length + 1):
                     window = columns[start : start + window_length]
                     if all(column["seq1_aa"] == column["seq2_aa"] for column in window):
