@@ -365,32 +365,20 @@ def _merge_and_partition_branch(
 def run(config: GrovemsConfig, outdir: Path) -> RescoringResult:
     """Run rescoring: database Oktoberfest, then de novo Oktoberfest, then Percolator + merge for both.
 
-    De novo's Oktoberfest run only depends on the database branch's ce_calibration/rt_model
-    (relinked below), so it's run right after the database branch's Oktoberfest step instead
-    of after that branch's Percolator + merge too -- nothing runs concurrently with either
-    Oktoberfest pass. Once both are done, independent steps across the two branches run
+    De novo Oktoberfest run only depends on the database branch (ce_calibration/rt_model).
+    Once both are done, independent steps across the two branches run
     concurrently where the real data dependencies allow it: database's Percolator run
-    alongside de novo's column filtering, then database's merge alongside de novo's
-    Percolator + merge (de novo's Percolator only needs database's weights.csv, not its
-    merge).
+    alongside de novo's column filtering, then database's merge alongside de novo
+    Percolator + merge (de novo's Percolator only needs database's weights.csv).
 
     With ``config.denovo_only``, there is no database branch: de novo computes its own
-    ce_calibration/rt_model instead of reusing one, and Percolator is skipped entirely
-    (it's only ever trained on the database branch's target/decoy competition).
+    ce_calibration/rt_model, and Percolator is skipped entirely.
 
-    Args:
-        config: Pipeline configuration.
-        outdir: Top-level output directory (results go under ``outdir/rescoring``).
-
-    Returns:
-        The per-branch merged/ directories the PSA stage reads from (``database_merged_dir``
-        is ``None`` for ``config.denovo_only``).
     """
     rescoring_dir = outdir / "rescoring"
     rescoring_dir.mkdir(parents=True, exist_ok=True)
-    num_threads = config.num_threads or os.cpu_count() or 1
+    num_threads = config.num_threads
 
-    # --- database branch: Oktoberfest ---
     database_dir: Optional[Path] = None
     if not config.denovo_only:
         if config.database_oktoberfest_dir:
@@ -407,7 +395,6 @@ def run(config: GrovemsConfig, outdir: Path) -> RescoringResult:
                 num_threads=num_threads,
             )
 
-    # --- de novo branch: Oktoberfest (reuses database's ce_calibration/rt_model, unless denovo_only) ---
     if config.denovo_oktoberfest_dir:
         denovo_dir = Path(config.denovo_oktoberfest_dir)
         logger.info("Reusing existing Oktoberfest de novo results: %s", denovo_dir)

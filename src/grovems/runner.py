@@ -19,14 +19,11 @@ def _require(config: GrovemsConfig, field_name: str) -> None:
 
 
 def run(config: GrovemsConfig) -> None:
-    """Run the pipeline: rescoring -> PSA -> IForest -> postprocess -> plotting, per config's stage toggles."""
+    """Run the pipeline"""
     outdir = Path(config.outdir)
 
     if config.run_psa and not config.run_rescoring:
-        raise ValueError(
-            "run_psa requires run_rescoring (PSA is chained directly from this invocation's "
-            "rescoring outputs, not an external directory). Enable both."
-        )
+        raise ValueError("run_psa requires run_rescoring, please enable both.")
 
     if config.iforest_training_source not in ("percolator_percentile", "denovo_score"):
         raise ValueError(
@@ -46,8 +43,6 @@ def run(config: GrovemsConfig) -> None:
 
     rescoring_result = None
     if config.run_rescoring:
-        # database_search_path/denovo_search_path/rawdata_path are only needed for
-        # branches that aren't reusing an existing Oktoberfest output directory.
         if config.denovo_only:
             if not config.denovo_oktoberfest_dir:
                 _require(config, "denovo_search_path")

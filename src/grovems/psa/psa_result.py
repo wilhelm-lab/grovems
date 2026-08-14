@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 
 @dataclass
 class PSAResult:
-    """Mutable record of one PSA classification, updated in place as PSA runs."""
+    """Data holder for PSA classification, updated in place as PSA runs for each peptide pair."""
 
     peptide_sequence: Tuple[str, str] = ("", "")
     monoisotopic_mass: Tuple[float, float] = (0.0, 0.0)
@@ -15,29 +15,21 @@ class PSAResult:
     selected_event: str = ""
     alignment: Any = None
     identity_count: int = 0
-    normalized_identity: float = 0.0
-    jaccard_similarity: float = 0.0
     levenshtein_distance: int = 0
-    similarity: float = 0.0
-    similarity_level: str = ""
     isobaric: bool = False
     anagram: bool = False
     label: str = ""
     details: Dict[str, Any] = field(default_factory=dict)
 
     def reset(self) -> PSAResult:
-        """Clear all fields back to their "no result yet" defaults, in place."""
+        """Clear all fields."""
         self.peptide_sequence = ("", "")
         self.monoisotopic_mass = (0.0, 0.0)
         self.tier = 0
         self.selected_event = "UNIDENTIFIED"
         self.alignment = None
         self.identity_count = 0
-        self.normalized_identity = 0.0
-        self.jaccard_similarity = 0.0
         self.levenshtein_distance = 0
-        self.similarity = 0.0
-        self.similarity_level = "NAN"
         self.isobaric = False
         self.anagram = False
         self.label = "NAN"
@@ -53,17 +45,13 @@ class PSAResult:
         selected_event: Optional[str] = None,
         alignment: Any = None,
         identity_count: Optional[int] = None,
-        normalized_identity: Optional[float] = None,
-        jaccard_similarity: Optional[float] = None,
         levenshtein_distance: Optional[int] = None,
-        similarity: Optional[float] = None,
-        similarity_level: Optional[str] = None,
         isobaric: Optional[bool] = None,
         anagram: Optional[bool] = None,
         label: Optional[str] = None,
         **details: Any,
     ) -> PSAResult:
-        """Set any given fields (leaving the rest untouched); extra kwargs merge into self.details."""
+        """Set any given fields."""
         if peptide_sequence is not None:
             self.peptide_sequence = peptide_sequence
         if monoisotopic_mass is not None:
@@ -76,16 +64,8 @@ class PSAResult:
             self.alignment = alignment
         if identity_count is not None:
             self.identity_count = identity_count
-        if normalized_identity is not None:
-            self.normalized_identity = normalized_identity
-        if jaccard_similarity is not None:
-            self.jaccard_similarity = jaccard_similarity
         if levenshtein_distance is not None:
             self.levenshtein_distance = levenshtein_distance
-        if similarity is not None:
-            self.similarity = similarity
-        if similarity_level is not None:
-            self.similarity_level = similarity_level
         if isobaric is not None:
             self.isobaric = isobaric
         if anagram is not None:
@@ -121,9 +101,6 @@ class PSAResult:
             "-----------\n"
             f"{alignment_str}\n"
             f"identity_count= {self.identity_count}\n"
-            "sequence_similarity_definition= identity_count / max(len(sequence1), len(sequence2))\n"
-            f"sequence_similarity= {self.similarity:.2f} - {self.similarity_level}\n"
-            f"legacy_jaccard_similarity= {self.jaccard_similarity:.2f}\n"
             f"levenshtein_distance= {self.levenshtein_distance}\n"
             f"\t{details_str}"
         )

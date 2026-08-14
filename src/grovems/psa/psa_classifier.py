@@ -96,35 +96,6 @@ class PSA(MassUtilsMixin, LevenshteinMixin, EventDetectionMixin, EventLabelingMi
             **({selected_event: event_details} if event_details is not None else {}),
         )
 
-    def assign_similarity(self, identities: int) -> None:
-        """Score similarity from an identity count and record it (plus its coarse level)."""
-        normalized_identity = identities / max(len(self.sequence1), len(self.sequence2))
-        divisor = len(self.sequence1) + len(self.sequence2) - identities
-        jaccard = identities / divisor if divisor else 1.0
-        if normalized_identity < 0.30:
-            similarity_level = "DIFFERENT"
-        elif normalized_identity >= 0.3 and normalized_identity < 0.5:
-            similarity_level = "SOMEWHAT_RELATED"
-        elif normalized_identity >= 0.5 and normalized_identity < 0.7:
-            similarity_level = "SIMILAR"
-        else:
-            similarity_level = "VERY_SIMILAR"
-        self.result.update(
-            identity_count=identities,
-            normalized_identity=normalized_identity,
-            jaccard_similarity=jaccard,
-            similarity=normalized_identity,
-            similarity_level=similarity_level,
-        )
-        self._debug(
-            "PSA similarity assigned: seq1=%s seq2=%s identities=%d normalized_identity=%.4f jaccard=%.4f level=%s",
-            self.sequence1,
-            self.sequence2,
-            identities,
-            normalized_identity,
-            jaccard,
-            similarity_level,
-        )
 
     def tier_assignment(self) -> None:
         """Run the full PSA rulebook: align + score similarity, assign a tier, detect the event."""
@@ -133,7 +104,6 @@ class PSA(MassUtilsMixin, LevenshteinMixin, EventDetectionMixin, EventLabelingMi
         self.result.update(isobaric=self.isobaric, anagram=self.anagram)
         self.sequence_alignment()
         self.aln_cnt = self.result.alignment.counts()
-        self.assign_similarity(self.aln_cnt.identities)
         levenshtein_distance = self.levenshtein_distance(self.sequence1, self.sequence2)
         final_tier = self.levenshtein_tier(levenshtein_distance)
         observed_changes = self.collect_observed_changes()
@@ -191,11 +161,10 @@ class PSA(MassUtilsMixin, LevenshteinMixin, EventDetectionMixin, EventLabelingMi
             change_summary=change_summary,
         )
         logger.debug(
-            "PSA classified: seq1=%s seq2=%s label=%s similarity=%.4f lev_distance=%d",
+            "PSA classified: seq1=%s seq2=%s label=%s lev_distance=%d",
             self.sequence1,
             self.sequence2,
             self.result.label,
-            self.result.similarity,
             self.result.levenshtein_distance,
         )
 
