@@ -41,15 +41,6 @@ class PSA(UtilsMixin, AlignerMixin):
         self.sequence2 = sequence2
         self.mass_1 = float(self.calculate_mass(sequence1))
         self.mass_2 = float(self.calculate_mass(sequence2))
-        self._debug(
-            "PSA sequences set: seq1=%s seq2=%s len1=%d len2=%d mass1=%.4f mass2=%.4f",
-            sequence1,
-            sequence2,
-            len(sequence1),
-            len(sequence2),
-            self.mass_1,
-            self.mass_2,
-        )
 
         if reset_result:
             self.result.reset()

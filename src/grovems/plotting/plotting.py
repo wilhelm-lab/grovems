@@ -144,8 +144,16 @@ def _plot_perc_vs_iso(
         n = int(mask.sum())
         weights = np.full(n, 1.0 / n) if n else np.array([])
         hb = ax_joint.hexbin(
-            iso[mask], percolator[mask], C=weights, reduce_C_function=np.sum, gridsize=90, extent=extent,
-            cmap=cmap, mincnt=1e-9, linewidths=0, alpha=0.55 if cmap == "Reds" else 1.0,
+            iso[mask],
+            percolator[mask],
+            C=weights,
+            reduce_C_function=np.sum,
+            gridsize=90,
+            extent=extent,
+            cmap=cmap,
+            mincnt=1e-9,
+            linewidths=0,
+            alpha=0.55 if cmap == "Reds" else 1.0,
         )
         layers.append(hb)
     if len(layers) > 1:
@@ -174,8 +182,16 @@ def _plot_perc_vs_iso(
             text = f"target: {int((quad_mask & target).sum()):,}\ndecoy: {int((quad_mask & ~target).sum()):,}"
         else:
             text = f"{int(quad_mask.sum()):,}"
-        ax_joint.text(x, y, text, transform=ax_joint.transAxes, ha=ha, va=va, fontsize=8.5,
-                      bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"))
+        ax_joint.text(
+            x,
+            y,
+            text,
+            transform=ax_joint.transAxes,
+            ha=ha,
+            va=va,
+            fontsize=8.5,
+            bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
+        )
 
     ax_joint.set_xlabel(f"isolation score, ISO_scores_{side} (0 = bad, 1 = good)")
     ax_joint.set_ylabel(f"percolator_score_{side}")
@@ -183,8 +199,9 @@ def _plot_perc_vs_iso(
     iso_bins = np.linspace(0.0, 1.0, 101)
     perc_bins = np.linspace(percolator.min(), percolator.max(), 121)
     for name, mask, color, _ in groups:
-        ax_marg_x.hist(iso[mask], bins=iso_bins, color=color, histtype="step", lw=1.6,
-                        label=f"{name} (n={int(mask.sum()):,})")
+        ax_marg_x.hist(
+            iso[mask], bins=iso_bins, color=color, histtype="step", lw=1.6, label=f"{name} (n={int(mask.sum()):,})"
+        )
         ax_marg_y.hist(percolator[mask], bins=perc_bins, orientation="horizontal", color=color, histtype="step", lw=1.6)
     ax_marg_x.axvline(cutoff, color="red", lw=1.3)
     ax_marg_y.axhline(_PERCOLATOR_THRESHOLD, color="red", lw=1.3)

@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 
 from spectrum_fundamentals.constants import AA_MOD
-from .psa_constant import *
 
 
 class UtilsMixin:

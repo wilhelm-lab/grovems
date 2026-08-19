@@ -54,7 +54,14 @@ html_context = {
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
 
-extensions = ["sphinx.ext.napoleon", "sphinx.ext.autodoc", "sphinx_autodoc_typehints", "sphinx.ext.viewcode", "sphinx.ext.intersphinx", "sphinx_jinja"]
+extensions = [
+    "sphinx.ext.napoleon",
+    "sphinx.ext.autodoc",
+    "sphinx_autodoc_typehints",
+    "sphinx.ext.viewcode",
+    "sphinx.ext.intersphinx",
+    "sphinx_jinja",
+]
 
 jinja_contexts = {
     "project_info": {
@@ -177,6 +184,7 @@ def modurl(qualname):
     start, end = get_linenos(obj)
     fragment = f"#L{start}-L{end}" if start and end else ""
     return f"{github_url}/{path}{fragment}"
+
 
 sitemap_url_scheme = "{link}"
 

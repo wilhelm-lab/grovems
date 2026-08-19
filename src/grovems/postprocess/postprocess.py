@@ -141,7 +141,10 @@ def _plot_ks_vs_tp(
         reference_sorted = reference_scores[side]
         scores = other[name]
         ax.plot(
-            grid, _ecdf_at(reference_sorted, grid), lw=1.8, label=f"trusted shared, {side} (n={len(reference_sorted):,})"
+            grid,
+            _ecdf_at(reference_sorted, grid),
+            lw=1.8,
+            label=f"trusted shared, {side} (n={len(reference_sorted):,})",
         )
         ax.plot(grid, _ecdf_at(np.sort(scores), grid), lw=1.8, label=f"{name} (n={len(scores):,})")
         ax.axvline(cutoff[side], color="0.4", ls="--", lw=0.9, label=f"cutoff: ISO_scores_{side}={cutoff[side]:.4f}")
@@ -270,7 +273,9 @@ def run(grove_forest_dir: Path) -> Path:
     other_scores = _add_goodness_column(files, reference_sorted)
     empty_others = [name for name, scores in other_scores.items() if len(scores) == 0]
     if empty_others:
-        raise ValueError(f"No uncorroborated PSMs found for {empty_others} in {results_dir} -- cannot compute a KS cutoff")
+        raise ValueError(
+            f"No uncorroborated PSMs found for {empty_others} in {results_dir} -- cannot compute a KS cutoff"
+        )
 
     divergence = {
         only_name: _ks_divergence(reference_sorted[side], other_scores[only_name])
@@ -326,7 +331,14 @@ def _plot_denovo_ks_vs_tp(reference_sorted: np.ndarray, other: np.ndarray, cutof
 
 
 def _write_denovo_good_bad_lists(files: list[Path], cutoff: float, grove_forest_dir: Path, qc_dir: Path) -> None:
-    columns = [*ID_COLUMNS, "ISO_scores_denovo", "TP_GOODNESS_denovo", "AA_SCORE_denovo", "SEQUENCE_denovo", "SCORE_denovo"]
+    columns = [
+        *ID_COLUMNS,
+        "ISO_scores_denovo",
+        "TP_GOODNESS_denovo",
+        "AA_SCORE_denovo",
+        "SEQUENCE_denovo",
+        "SCORE_denovo",
+    ]
     combined = pd.concat([pd.read_parquet(path, columns=columns) for path in files], ignore_index=True)
 
     combined["SEQUENCE"] = combined.pop("SEQUENCE_denovo")

@@ -5,7 +5,6 @@ from .psa_utils import UtilsMixin
 
 
 class AlignerMixin:
-
     @staticmethod
     def align(
         seq1,

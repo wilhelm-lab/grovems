@@ -15,9 +15,9 @@ run_plotting: false
 outdir: results
 
 # ---- rescoring stage: inputs ----
-database_search_path: null   # dir of MSFragger/FragPipe combined search results
-denovo_search_path: null     # dir of Casanovo search results
-rawdata_path: null           # dir of mzML spectra
+database_search_path: null # dir of MSFragger/FragPipe combined search results
+denovo_search_path: null # dir of Casanovo search results
+rawdata_path: null # dir of mzML spectra
 database_search_type: Msfragger
 denovo_search_type: Casanovo
 spectra_type: mzML
@@ -41,12 +41,12 @@ fdr_estimation_method: percolator
 all_features: false
 regression_method: spline
 ssl: true
-thermo_exe: null             # path to a local ThermoRawFileParser.exe; unset uses Oktoberfest's own default
+thermo_exe: null # path to a local ThermoRawFileParser.exe; unset uses Oktoberfest's own default
 mass_tolerance: 20
 p_window: 1.2
 unit_mass_tolerance: ppm
 fragmentation_method: HCD
-num_threads: null            # unset uses os.cpu_count()
+num_threads: null # unset uses os.cpu_count()
 
 # ---- rescoring stage: column filtering before Percolator ----
 drop_columns_database: "lda_scores annotated_ions delta_mass_ppm log10_evalue next_score collision_energy_aligned"
@@ -67,9 +67,9 @@ percolator_train_fdr: 0.01
 percolator_verbose: 3
 
 # ---- psa stage ----
-psa_max_raw_files: null      # limit to first N raw files, for testing
-overwrite_outputs: false     # overwrite existing per-RAW output files (merged/, grove_forest/)
-psa_max_workers: null        # unset uses os.cpu_count()
+psa_max_raw_files: null # limit to first N raw files, for testing
+overwrite_outputs: false # overwrite existing per-RAW output files (merged/, grove_forest/)
+psa_max_workers: null # unset uses os.cpu_count()
 
 # ---- iforest stage ----
 # SUOD feature columns to train/score on.
@@ -89,7 +89,7 @@ iforest_features:
 # How the SUOD training set is picked: percolator_percentile (default, top 30% of
 # trusted shared PSMs by Percolator score) or denovo_score (SCORE_denovo >= threshold).
 iforest_training_source: percolator_percentile
-iforest_denovo_score_threshold: 0.9   # only used when iforest_training_source is denovo_score
+iforest_denovo_score_threshold: 0.9 # only used when iforest_training_source is denovo_score
 # Only needed when run_iforest is true but run_psa is false (standalone iforest run);
 # otherwise the PSA stage's own grove_forest/ output is used directly.
 grove_forest_dir: null
