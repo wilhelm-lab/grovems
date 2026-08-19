@@ -1,4 +1,4 @@
-from grovems.psa.psa_classifier import PSA
+from grovems.psa.psa import PSA
 
 
 def _classify(sequence1: str, sequence2: str) -> PSA:

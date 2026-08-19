@@ -12,7 +12,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 from tqdm.auto import tqdm
 
-from .psa_classifier import PSA
+from .psa import PSA
 
 logger = logging.getLogger(__name__)
 
