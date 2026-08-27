@@ -101,7 +101,7 @@ def _run_oktoberfest_stage(
         "prediction_server": config.prediction_server,
         "numThreads": num_threads,
         "fdr_estimation_method": config.fdr_estimation_method,
-        "all_features": config.all_features,
+        "allFeatures": config.all_features,
         "regressionMethod": config.regression_method,
         "ssl": config.ssl,
         "massTolerance": config.mass_tolerance,

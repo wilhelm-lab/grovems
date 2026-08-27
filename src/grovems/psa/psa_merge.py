@@ -154,13 +154,19 @@ def _run_psa_for_pairs(sequences_database: pd.Series, sequences_denovo: pd.Serie
 
 
 def _add_psa_columns(merged_scan: pd.DataFrame) -> None:
-    """Classify PSA on shared, sequence-differing scans; add PSA columns to every row.
+    """Classify PSA on shared, residue-differing scans; add PSA columns to every row.
 
     Rows outside "shared" (database_only/denovo_only), or shared rows missing a
     sequence on either side, get null PSA columns -- PSA only applies where both a
     database and a de novo call exist for the same scan.
+
+    Shared rows split three ways: the same peptide on both sides is
+    "PSA - Tier 0 - IDENTICAL", the same residues with a different modification state or
+    precursor charge is "PSA - Tier 0 - IDENTICAL_UNMODIFIED", and only genuinely
+    different residues reach the classifier.
     """
-    required = ["_merge", "SEQUENCE_database", "SEQUENCE_denovo"]
+    required = ["_merge", "SEQUENCE_database", "SEQUENCE_denovo", "sequence_match",
+                "unmodified_sequence_match"]
     missing = [column for column in required if column not in merged_scan.columns]
     if missing:
         raise KeyError(f"Missing columns needed for PSA: {missing}")
@@ -174,11 +180,32 @@ def _add_psa_columns(merged_scan: pd.DataFrame) -> None:
         & merged_scan["SEQUENCE_database"].notna()
         & merged_scan["SEQUENCE_denovo"].notna()
     )
-    same_sequence_mask = shared_mask & merged_scan["sequence_match"]
-    different_sequence_mask = shared_mask & ~merged_scan["sequence_match"]
 
-    merged_scan.loc[same_sequence_mask, "PSA"] = "PSA - Tier 0 - IDENTICAL"
-    merged_scan.loc[same_sequence_mask, "PSA_LEVENSHTEIN"] = 0
+    # The classifier is given SEQUENCE_database/SEQUENCE_denovo -- the *unmodified*
+    # sequences -- so it can only be handed pairs whose unmodified sequences differ.
+    # The gate below used to be `sequence_match`, which is
+    # `modified_sequence_match & precursor_charge_match`: a pair differing only in its
+    # modifications or charge failed that gate and reached the classifier as two identical
+    # strings, coming back with a fabricated tier and a vacuously true ISOBARIC flag (both
+    # masses computed from the same string). Those pairs are labelled here instead, and
+    # only genuinely different residues go to the classifier. The three masks are disjoint
+    # and together cover shared_mask.
+    identical_mask = shared_mask & merged_scan["sequence_match"]
+    same_residues_mask = (
+        shared_mask & ~merged_scan["sequence_match"] & merged_scan["unmodified_sequence_match"]
+    )
+    different_sequence_mask = (
+        shared_mask & ~merged_scan["sequence_match"] & ~merged_scan["unmodified_sequence_match"]
+    )
+
+    merged_scan.loc[identical_mask, "PSA"] = "PSA - Tier 0 - IDENTICAL"
+    merged_scan.loc[identical_mask, "PSA_LEVENSHTEIN"] = 0
+
+    # same residues, but a different modification state and/or precursor charge; Tier 0
+    # because the tier axis is the unmodified-sequence edit distance, which is 0 here.
+    # No ISOBARIC field: PSA never sees the modifications and so cannot judge it.
+    merged_scan.loc[same_residues_mask, "PSA"] = "PSA - Tier 0 - IDENTICAL_UNMODIFIED"
+    merged_scan.loc[same_residues_mask, "PSA_LEVENSHTEIN"] = 0
 
     if different_sequence_mask.any():
         scored = _run_psa_for_pairs(
@@ -233,9 +260,6 @@ def run(
     if max_raw_files is not None:
         raw_files = raw_files[:max_raw_files]
 
-    # A raw file missing entirely from one branch (e.g. database found zero PSMs for it, or
-    # denovo_only mode where the whole branch is absent) still needs that side's full column
-    # set so every _database/_denovo-suffixed column downstream stages expect actually exists.
     database_template = _branch_schema_columns(database_merged_dir)
     denovo_template = _branch_schema_columns(denovo_merged_dir)
 

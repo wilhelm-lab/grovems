@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 _TARGET_COLOR, _DECOY_COLOR = "#2a78d6", "#c44e52"
 _SIDE_CMAP = {"database": "Blues", "denovo": "Oranges"}
 _PERCOLATOR_THRESHOLD = 0.0
+DETECTION_LEVEL_ORDER = ("shared", "database", "denovo")
+DETECTION_LEVEL_LABELS = {"shared": "Shared PSM", "database": "Database only", "denovo": "De novo only"}
+DETECTION_LEVEL_COLORS = {"shared": "#2a78d6", "database": "#eb6834", "denovo": "#1baf7a"}
 
 
 def _plot_shared_venn(shared_scan_count: int, shared_psm_count: int, out_path: Path) -> None:
@@ -33,7 +36,7 @@ def _plot_shared_venn(shared_scan_count: int, shared_psm_count: int, out_path: P
     venn2(
         subsets=(n_conflict, 0, shared_psm_count),
         set_labels=("shared scans", "shared PSM"),
-        set_colors=(postprocess.DETECTION_LEVEL_COLORS["shared"], postprocess.DETECTION_LEVEL_COLORS["database"]),
+        set_colors=(DETECTION_LEVEL_COLORS["shared"], DETECTION_LEVEL_COLORS["database"]),
         ax=ax,
     )
     frac = shared_psm_count / shared_scan_count if shared_scan_count else float("nan")
@@ -54,7 +57,7 @@ def _plot_levenshtein_distribution(distances: np.ndarray, out_path: Path) -> Non
     """
     bins = np.arange(0, int(distances.max()) + 2) - 0.5
     fig, ax = plt.subplots(figsize=(7, 5))
-    ax.hist(distances, bins=bins, color=postprocess.DETECTION_LEVEL_COLORS["shared"])
+    ax.hist(distances, bins=bins, color=DETECTION_LEVEL_COLORS["shared"])
     ax.set_yscale("log")
     ax.set_xlabel("Levenshtein distance (database vs de novo sequence)")
     ax.set_ylabel("count (log scale)")
@@ -77,7 +80,7 @@ def _plot_peptide_length_distribution(database_lengths: np.ndarray, denovo_lengt
             density=True,
             histtype="step",
             lw=1.8,
-            color=postprocess.DETECTION_LEVEL_COLORS[name],
+            color=DETECTION_LEVEL_COLORS[name],
             label=f"{name} (n={len(values):,}, median {np.median(values):.0f})",
         )
     ax.set_xlabel("peptide length")
@@ -100,13 +103,95 @@ def _plot_peptide_length_distribution_denovo(denovo_lengths: np.ndarray, out_pat
         density=True,
         histtype="step",
         lw=1.8,
-        color=postprocess.DETECTION_LEVEL_COLORS["denovo"],
+        color=DETECTION_LEVEL_COLORS["denovo"],
         label=f"denovo (n={len(denovo_lengths):,}, median {np.median(denovo_lengths):.0f})",
     )
     ax.set_xlabel("peptide length")
     ax.set_ylabel("density")
     ax.set_title("Peptide length distribution -- de novo")
     ax.legend(fontsize=9)
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close(fig)
+
+
+def plot_ks_vs_tp(
+    reference_scores: dict[str, np.ndarray], other: dict[str, np.ndarray], cutoff: dict[str, float], out_path: Path
+) -> None:
+    """One ECDF panel per side, each against its own side-matched reference and cutoff."""
+    pairs = list(postprocess.SIDE_ONLY_MERGE.items())
+    all_values = [reference_scores[side] for side, _ in pairs] + [other[name] for _, name in pairs]
+    grid = np.linspace(min(v.min() for v in all_values), max(v.max() for v in all_values), 501)
+
+    fig, axes = plt.subplots(1, len(pairs), figsize=(5.5 * len(pairs), 4.6), sharey=True)
+    axes = np.atleast_1d(axes)
+    for ax, (side, name) in zip(axes, pairs):
+        reference_sorted = reference_scores[side]
+        scores = other[name]
+        sorted_scores = np.sort(scores)
+        ax.plot(
+            grid,
+            np.searchsorted(reference_sorted, grid, side="right") / len(reference_sorted),
+            lw=1.8,
+            label=f"trusted shared, {side} (n={len(reference_sorted):,})",
+        )
+        ax.plot(
+            grid,
+            np.searchsorted(sorted_scores, grid, side="right") / len(sorted_scores),
+            lw=1.8,
+            label=f"{name} (n={len(scores):,})",
+        )
+        ax.axvline(cutoff[side], color="0.4", ls="--", lw=0.9, label=f"cutoff: ISO_scores_{side}={cutoff[side]:.4f}")
+        ax.set_xlabel(f"ISO_scores_{side} (0-1 scale; 1 = good, 0 = bad)")
+        ax.set_title(f"ECDF: trusted shared vs {name}")
+        ax.legend(fontsize=8, loc="lower right")
+    axes[0].set_ylabel("cumulative fraction (ECDF)")
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close(fig)
+
+
+def plot_detection_level_counts(counts: pd.Series, out_path: Path) -> None:
+    """Bar chart of PSM counts per detection level (shared / database-only / denovo-only)."""
+    values = [int(counts.get(level, 0)) for level in DETECTION_LEVEL_ORDER]
+    labels = [DETECTION_LEVEL_LABELS[level] for level in DETECTION_LEVEL_ORDER]
+    colors = [DETECTION_LEVEL_COLORS[level] for level in DETECTION_LEVEL_ORDER]
+
+    fig, ax = plt.subplots(figsize=(5.5, 4.4))
+    bars = ax.bar(labels, values, color=colors, width=0.6)
+    ax.bar_label(bars, labels=[f"{v:,}" for v in values], padding=3)
+    ax.set_ylabel("PSM count")
+    ax.set_title("PSMs by detection level")
+    ax.margins(y=0.12)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close(fig)
+
+
+def plot_denovo_ks_vs_tp(reference_sorted: np.ndarray, other: np.ndarray, cutoff: float, out_path: Path) -> None:
+    grid = np.linspace(min(reference_sorted.min(), other.min()), max(reference_sorted.max(), other.max()), 501)
+    sorted_other = np.sort(other)
+
+    fig, ax = plt.subplots(figsize=(5.5, 4.6))
+    ax.plot(
+        grid,
+        np.searchsorted(reference_sorted, grid, side="right") / len(reference_sorted),
+        lw=1.8,
+        label=f"trusted de novo (n={len(reference_sorted):,})",
+    )
+    ax.plot(
+        grid,
+        np.searchsorted(sorted_other, grid, side="right") / len(sorted_other),
+        lw=1.8,
+        label=f"rest of de novo (n={len(other):,})",
+    )
+    ax.axvline(cutoff, color="0.4", ls="--", lw=0.9, label=f"cutoff: ISO_scores_denovo={cutoff:.4f}")
+    ax.set_xlabel("ISO_scores_denovo (0-1 scale; 1 = good, 0 = bad)")
+    ax.set_ylabel("cumulative fraction (ECDF)")
+    ax.set_title("ECDF: trusted de novo vs rest of de novo")
+    ax.legend(fontsize=8, loc="lower right")
     plt.tight_layout()
     plt.savefig(out_path)
     plt.close(fig)
@@ -129,7 +214,7 @@ def _plot_perc_vs_iso(
     groups = (
         [("target", target, _TARGET_COLOR, _SIDE_CMAP[side]), ("decoy", ~target, _DECOY_COLOR, "Reds")]
         if target is not None
-        else [("all", np.ones(len(iso), dtype=bool), postprocess.DETECTION_LEVEL_COLORS[side], _SIDE_CMAP[side])]
+        else [("all", np.ones(len(iso), dtype=bool), DETECTION_LEVEL_COLORS[side], _SIDE_CMAP[side])]
     )
 
     extent = (0.0, 1.0, float(percolator.min()), float(percolator.max()))

@@ -7,12 +7,13 @@ from rapidfuzz.distance import Levenshtein
 
 from .psa_aligner import AlignerMixin
 from .psa_utils import UtilsMixin
+from .psa_event_detection import EventDetectionMixin
 from .psa_result import PSAResult
 
 __all__ = ["PSA", "PSAResult"]
 
 
-class PSA(UtilsMixin, AlignerMixin):
+class PSA(UtilsMixin, EventDetectionMixin, AlignerMixin):
     """Classifies the difference between two peptide sequences."""
 
     def __init__(
@@ -73,7 +74,7 @@ class PSA(UtilsMixin, AlignerMixin):
         self.tier_assignment()
 
         # Align sequences
-        aln_res = AlignerMixin.align()
+        aln_res = self.align(self.sequence1, self.sequence2)
         # Take alignment and define candidate events
         event_labels = self.candidate_events(aln_res)
         # Select or Label the event
@@ -93,6 +94,7 @@ class PSA(UtilsMixin, AlignerMixin):
         self.result.update(
             isobaric=self.isobaric,
             anagram=self.anagram,
+            alignment=aln_res,
             label=f"{label}",
             label_event_name=label_event_name,
             isobaric_label=isobaric_label,

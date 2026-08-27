@@ -49,6 +49,8 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
+tests/integration_tests/out
+tests/integration_tests/data
 
 # Sphinx documentation
 docs/_build/

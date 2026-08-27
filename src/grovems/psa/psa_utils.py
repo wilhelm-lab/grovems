@@ -19,6 +19,11 @@ class UtilsMixin:
     @staticmethod
     def _get_tier(distance):
 
+        # Tier 0 is "the two sequences are the same". Without this branch a distance of 0
+        # falls through to the first upper bound (< 4) and is reported as Tier 1.
+        if distance == 0:
+            return "Tier 0"
+
         LEVENSHTEIN_TIER_UPPERBOND = {
             "Tier 1": 4,
             "Tier 2": 7,
@@ -29,5 +34,4 @@ class UtilsMixin:
         for label, upper_bond in LEVENSHTEIN_TIER_UPPERBOND.items():
             if distance < upper_bond:
                 return label
-            else:
-                return "Tier 5"
+        return "Tier 5"

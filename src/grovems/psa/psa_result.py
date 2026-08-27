@@ -76,10 +76,18 @@ class PSAResult:
             self.details.update(details)
         return self
 
+    def _alignment_str(self) -> str:
+        """Render the alignment as target/match/query lines, e.g. 'target  PEPTIDE'."""
+        if self.alignment is None:
+            return "None"
+        if isinstance(self.alignment, dict) and {"g1", "mk", "g2"} <= self.alignment.keys():
+            return f"target  {self.alignment['g1']}\n        {self.alignment['mk']}\nquery   {self.alignment['g2']}"
+        return str(self.alignment)
+
     def __str__(self) -> str:
         s1, s2 = self.peptide_sequence
         m1, m2 = self.monoisotopic_mass
-        alignment_str = str(self.alignment) if self.alignment is not None else "None"
+        alignment_str = self._alignment_str()
 
         details_str = ""
         if self.details:
@@ -96,10 +104,10 @@ class PSAResult:
             f"tier= {self.label}\n"
             f"peptide_sequence= {s1!r}, {s2!r} \n"
             f"monoisotopic_mass= {m1:.4f}, {m2:.4f} \n\n"
-            f"isobaric= {self.isobaric} | anagram= {self.anagram}\n"
+            f"isobaric= {self.isobaric} | anagram= {self.anagram}\n\n"
             f"alignment:\n"
             "-----------\n"
-            f"{alignment_str}\n"
+            f"{alignment_str}\n\n"
             f"identity_count= {self.identity_count}\n"
             f"levenshtein_distance= {self.levenshtein_distance}\n"
             f"\t{details_str}"

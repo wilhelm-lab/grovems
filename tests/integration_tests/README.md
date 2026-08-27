@@ -19,6 +19,5 @@ with IForest disabled:
 IForest is skipped: SUOD needs a reasonably large shared-PSM training set to fit at all
 (at least 2 base estimators, each needing >= 256 rows -- see `build_suod_model` in
 `src/grovems/iforest/iforest.py`), and a single raw file's shared PSMs will usually be
-too few. To try it anyway, or to run against a larger real input set, invoke `grovems
-run` directly against a small real `database_search_path`/`denovo_search_path`/
+too few. To try it anyway, or to run against a larger real input set, invoke `grovems run` directly against a small real `database_search_path`/`denovo_search_path`/
 `rawdata_path` (still small enough to run quickly, unlike a full production dataset).

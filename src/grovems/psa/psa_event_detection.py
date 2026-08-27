@@ -59,25 +59,36 @@ class EventDetectionMixin:
 
     @classmethod
     def _terminal_mismatch_events(cls, alignment_meta) -> Optional[List[Dict[str, Any]]]:
-        """N-/C-TERM-MISMATCH: a mismatch run touching the very start or end of the alignment."""
+        """N-/C-TERM-MISMATCH: a mismatch run within the first/last 2 residues, when most of the
+        alignment otherwise matches. Populates alignment_meta["_terminal_claimed"] with the runs
+        used, so _detect_substitution doesn't double-count them."""
         g1, g2, mk = alignment_meta["g1"], alignment_meta["g2"], alignment_meta["mk"]
         events = []
-        for symbol, start, end in alignment_meta["_runs"]:
-            if symbol != ".":
-                continue
-            if start == 0:
-                events.append(cls._block_event(g1, g2, start, end, "N-TERM-MISMATCH"))
-            elif end == len(mk):
-                events.append(cls._block_event(g1, g2, start, end, "C-TERM-MISMATCH"))
+        claimed = set()
+        if mk and mk.count("|") / len(mk) >= 0.7:
+            for symbol, start, end in alignment_meta["_runs"]:
+                if symbol != ".":
+                    continue
+                is_n_term = start < 2
+                is_c_term = end > len(mk) - 2
+                if is_n_term:
+                    events.append(cls._block_event(g1, g2, start, end, "N-TERM-MISMATCH"))
+                if is_c_term:
+                    events.append(cls._block_event(g1, g2, start, end, "C-TERM-MISMATCH"))
+                if is_n_term or is_c_term:
+                    claimed.add((start, end))
+        alignment_meta["_terminal_claimed"] = claimed
         return events or None
 
     @classmethod
     def _detect_substitution(cls, alignment_meta) -> Optional[List[Dict[str, Any]]]:
-        """Non-terminal SUBSTITUTION ("." runs) and ISOBARIC-SUBSTITUTION ("=" runs)."""
-        g1, g2, mk = alignment_meta["g1"], alignment_meta["g2"], alignment_meta["mk"]
+        """Non-terminal SUBSTITUTION ("." runs not already claimed as terminal) and
+        ISOBARIC-SUBSTITUTION ("=" runs)."""
+        g1, g2 = alignment_meta["g1"], alignment_meta["g2"]
+        claimed = alignment_meta.get("_terminal_claimed", set())
         events = []
         for symbol, start, end in alignment_meta["_runs"]:
-            if symbol == "." and start > 0 and end < len(mk):
+            if symbol == "." and (start, end) not in claimed:
                 events.append(cls._block_event(g1, g2, start, end, "SUBSTITUTION"))
             elif symbol == "=":
                 events.append(cls._block_event(g1, g2, start, end, "ISOBARIC-SUBSTITUTION"))
