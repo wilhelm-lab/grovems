@@ -88,3 +88,4 @@ dmypy.json
 .vscode/
 .idea/
 .DS_Store
+tests/integration_tests/
