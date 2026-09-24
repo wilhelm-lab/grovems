@@ -109,9 +109,7 @@ def _run_oktoberfest_stage(
         "unitMassTolerance": config.unit_mass_tolerance,
         "fragmentation_method": config.fragmentation_method,
     }
-    # Omitted entirely (not set to null) when unset: Oktoberfest's Config.thermo_exe does
-    # self.data.get("thermoExe", default_thermo()) -- an explicit null would return None
-    # instead of falling through to the default, crashing downstream.
+
     if config.thermo_exe:
         cfg["thermoExe"] = config.thermo_exe
     config_path.write_text(json.dumps(cfg, indent=4))
@@ -122,9 +120,6 @@ def _run_oktoberfest_stage(
             oktoberfest_runner.run_job(str(config_path))
             return
         except SystemExit as exc:
-            # A worker pool failure inside Oktoberfest (JobPool.check_pool) calls
-            # sys.exit(1) instead of raising a normal exception -- catch it explicitly so
-            # it doesn't kill the whole grovems process.
             error = RuntimeError(f"Oktoberfest exited (SystemExit({exc.code})) while running {config_path}")
             error.__cause__ = exc
         except Exception as exc:
@@ -141,8 +136,6 @@ def _run_oktoberfest_stage(
 
 def _run_percolator(config: GrovemsConfig, args: list[str], *, cwd: Path) -> None:
     if config.percolator_module:
-        # `module load` is a shell function (from Lmod/Environment Modules init), not a
-        # binary -- needs a real shell, not the args-list subprocess form.
         command = " ".join(shlex.quote(part) for part in [config.percolator_exe, *args])
         shell_command = f"module load {config.percolator_module} && {command}"
         logger.info("Running percolator via shell (module load %s)", config.percolator_module)
@@ -257,9 +250,6 @@ def _partition_by_raw_file(
                     writer = pq.ParquetWriter(raw_dir / f"{label}.parquet", table.schema)
                     writers[raw_file] = writer
                 elif not table.schema.equals(writer.schema):
-                    # Chunk-local dtype inference (e.g. an int column that only turns out to
-                    # have nulls in a later chunk) can drift between chunks for the same raw
-                    # file; align to the first chunk's schema rather than failing the write.
                     table = table.cast(writer.schema, safe=False)
                 writer.write_table(table)
     finally:
@@ -473,9 +463,6 @@ def run(config: GrovemsConfig, outdir: Path) -> RescoringResult:
     def _drop_denovo_columns() -> list[str]:
         return _drop_columns(str(denovo_rescore_tab), str(denovo_rescore_tab), "\t", config.drop_columns_denovo.split())
 
-    # Database's Percolator run only needs its own rescore.tab (already on disk); de novo's
-    # column filtering is on a different file and doesn't depend on database's Percolator at
-    # all -- run them concurrently instead of one after the other.
     with ThreadPoolExecutor(max_workers=2) as pool:
         database_columns_future = pool.submit(_drop_database_columns_and_run_percolator)
         denovo_columns_future = pool.submit(_drop_denovo_columns)
@@ -522,10 +509,6 @@ def run(config: GrovemsConfig, outdir: Path) -> RescoringResult:
             keep_columns=DENOVO_COLUMNS,
         )
 
-    # Database's merge only needs its own Percolator output, already on disk at this point;
-    # de novo's Percolator only needs database's weights.csv, also already on disk -- neither
-    # depends on the other, so run database's merge concurrently with de novo's Percolator run
-    # instead of merge-then-percolator.
     with ThreadPoolExecutor(max_workers=2) as pool:
         database_merge_future = pool.submit(_merge_database)
         denovo_future = pool.submit(_run_denovo_percolator_and_merge)

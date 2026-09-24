@@ -19,8 +19,6 @@ class UtilsMixin:
     @staticmethod
     def _get_tier(distance):
 
-        # Tier 0 is "the two sequences are the same". Without this branch a distance of 0
-        # falls through to the first upper bound (< 4) and is reported as Tier 1.
         if distance == 0:
             return "Tier 0"
 

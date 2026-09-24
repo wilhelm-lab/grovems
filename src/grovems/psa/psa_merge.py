@@ -66,10 +66,6 @@ def _merge_search_results(merged_database: pd.DataFrame, merged_denovo: pd.DataF
     def suffix_non_key_columns(df: pd.DataFrame, suffix: str) -> pd.DataFrame:
         return df.rename(columns={c: f"{c}{suffix}" for c in df.columns if c not in _MERGE_KEY_COLUMNS})
 
-    # Suffix columns ourselves rather than pandas' merge(suffixes=...), which only
-    # suffixes columns that collide by name -- if a raw file has no data at all on one
-    # side, that side has nothing to collide with, so its columns would come through
-    # unsuffixed instead of e.g. SEQUENCE_denovo.
     merged = suffix_non_key_columns(merged_database, "_database").merge(
         suffix_non_key_columns(merged_denovo, "_denovo"),
         how="outer",
@@ -77,7 +73,6 @@ def _merge_search_results(merged_database: pd.DataFrame, merged_denovo: pd.DataF
         indicator=True,
     )
 
-    # Coalesce SpecId (present, suffixed, on whichever side(s) had it).
     left_specid = merged["SpecId_database"] if "SpecId_database" in merged.columns else None
     right_specid = merged["SpecId_denovo"] if "SpecId_denovo" in merged.columns else None
     if left_specid is not None or right_specid is not None:
@@ -86,14 +81,10 @@ def _merge_search_results(merged_database: pd.DataFrame, merged_denovo: pd.DataF
             right_specid if right_specid is not None else empty
         )
 
-    # A side with no data at all for this file never had a SEQUENCE column to suffix
-    # above -- add it as all-null so required-column checks below don't see this as
-    # a missing-data bug.
     for column in ("SEQUENCE_database", "SEQUENCE_denovo"):
         if column not in merged.columns:
             merged[column] = None
 
-    # Flag scans where the database side called more than one distinct peptide (chimeric spectra).
     chimeric_required = ["RAW_FILE", "SCAN_NUMBER", "SEQUENCE"]
     chimeric_scan_keys: set[tuple[str, int]] = set()
     if not merged_database.empty and set(chimeric_required).issubset(merged_database.columns):
@@ -180,16 +171,6 @@ def _add_psa_columns(merged_scan: pd.DataFrame) -> None:
         & merged_scan["SEQUENCE_database"].notna()
         & merged_scan["SEQUENCE_denovo"].notna()
     )
-
-    # The classifier is given SEQUENCE_database/SEQUENCE_denovo -- the *unmodified*
-    # sequences -- so it can only be handed pairs whose unmodified sequences differ.
-    # The gate below used to be `sequence_match`, which is
-    # `modified_sequence_match & precursor_charge_match`: a pair differing only in its
-    # modifications or charge failed that gate and reached the classifier as two identical
-    # strings, coming back with a fabricated tier and a vacuously true ISOBARIC flag (both
-    # masses computed from the same string). Those pairs are labelled here instead, and
-    # only genuinely different residues go to the classifier. The three masks are disjoint
-    # and together cover shared_mask.
     identical_mask = shared_mask & merged_scan["sequence_match"]
     same_residues_mask = (
         shared_mask & ~merged_scan["sequence_match"] & merged_scan["unmodified_sequence_match"]
@@ -201,9 +182,6 @@ def _add_psa_columns(merged_scan: pd.DataFrame) -> None:
     merged_scan.loc[identical_mask, "PSA"] = "PSA - Tier 0 - IDENTICAL"
     merged_scan.loc[identical_mask, "PSA_LEVENSHTEIN"] = 0
 
-    # same residues, but a different modification state and/or precursor charge; Tier 0
-    # because the tier axis is the unmodified-sequence edit distance, which is 0 here.
-    # No ISOBARIC field: PSA never sees the modifications and so cannot judge it.
     merged_scan.loc[same_residues_mask, "PSA"] = "PSA - Tier 0 - IDENTICAL_UNMODIFIED"
     merged_scan.loc[same_residues_mask, "PSA_LEVENSHTEIN"] = 0
 

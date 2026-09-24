@@ -44,7 +44,7 @@ def select_training_candidates(
 def build_training_set(candidates: pd.DataFrame, training_source: str = "percolator_percentile") -> pd.DataFrame:
     """Apply the Percolator-percentile cutoff (percolator_percentile only) and unsuffix feature columns."""
     if training_source == "denovo_score":
-        train_set = candidates  # uniquely owned by this call (caller passes a fresh pd.concat(...) result)
+        train_set = candidates
         suffix = "_denovo"
     else:
         cutoff = np.percentile(candidates.percolator_score_database.to_numpy(), 70)

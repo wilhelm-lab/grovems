@@ -73,23 +73,12 @@ class PSA(UtilsMixin, EventDetectionMixin, AlignerMixin):
 
         self.tier_assignment()
 
-        # Identical sequences carry no residue difference to classify. The alignment is all
-        # matches, the edit distance is 0, and both `isobaric` and `anagram` come out
-        # vacuously true because the two masses are computed from the same string -- so a
-        # 4-part label would advertise an ISOBARIC field that means nothing. Emit the same
-        # canonical 3-part label the merge stage writes for agreeing pairs instead.
-        #
-        # This keeps the invariant "an IDENTICAL event implies Tier 0" true for direct
-        # callers of PSA, not only for pairs routed through psa_merge's gate. Older builds
-        # violated it: psa_utils._get_tier had no `distance == 0` branch, so distance 0 fell
-        # through to the `< 4` bound and was reported as Tier 1, producing the contradictory
-        # `PSA - Tier 1 - ISOBARIC - IDENTICAL` still present in run.19082026's parquet.
         if self.sequence1 == self.sequence2:
             self.result.update(
                 isobaric=self.isobaric,
                 anagram=self.anagram,
                 alignment=self.align(self.sequence1, self.sequence2),
-                tier="0",  # string, matching tier_assignment's `final_tier[-1]`
+                tier="0", 
                 label="PSA - Tier 0 - IDENTICAL",
                 label_event_name="IDENTICAL",
                 isobaric_label="IDENTICAL",
@@ -98,11 +87,8 @@ class PSA(UtilsMixin, EventDetectionMixin, AlignerMixin):
             )
             return
 
-        # Align sequences
         aln_res = self.align(self.sequence1, self.sequence2)
-        # Take alignment and define candidate events
         event_labels = self.candidate_events(aln_res)
-        # Select or Label the event
         event_names = [event["event"] for event in event_labels]
         if len(event_names) == 2:
             label_event_name = "+".join(event_names)

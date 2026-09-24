@@ -12,9 +12,6 @@ logger = logging.getLogger(__name__)
 
 ID_COLUMNS = ["SpecId", "RAW_FILE", "SCAN_NUMBER"]
 SIDES = ("database", "denovo")
-# Each side's own uncorroborated-hit population, compared against that side's own
-# trusted-shared reference -- keeps the two KS tests (and the two cutoffs they produce)
-# from being blended across sides that were scored on different feature vectors.
 SIDE_ONLY_MERGE = {"database": "database_only", "denovo": "denovo_only"}
 SCORE_COLUMNS = {
     "SCORE_denovo": "CASANOVO_SCORE",
@@ -97,8 +94,6 @@ def _write_good_bad_lists(files: list[Path], cutoff: dict[str, float], grove_for
         {"shared": "shared", "database_only": "database", "denovo_only": "denovo"}
     )
 
-    # Count actual shared PSMs, not shared scans -- a shared scan where the two engines called
-    # different peptides is split into the database/denovo buckets via sequence_match instead.
     shared_scan = combined["DETECTION_LEVEL"] == "shared"
     conflicting = shared_scan & ~combined["sequence_match"]
     psm_counts = pd.Series(
@@ -118,7 +113,6 @@ def _write_good_bad_lists(files: list[Path], cutoff: dict[str, float], grove_for
         scores = combined[f"ISO_scores_{side}"]
         combined[f"CALL_{side}"] = np.where(scores.notna(), np.where(scores >= cutoff[side], "GOOD", "BAD"), None)
 
-    # database for shared/database_only, denovo for denovo_only -- same policy as the old ISO_scores_side.
     is_denovo_side = combined["DETECTION_LEVEL"].eq("denovo")
     combined["TP_GOODNESS"] = np.where(is_denovo_side, combined["TP_GOODNESS_denovo"], combined["TP_GOODNESS_database"])
     combined["CALL"] = np.where(is_denovo_side, combined["CALL_denovo"], combined["CALL_database"])
@@ -146,7 +140,7 @@ def run(grove_forest_dir: Path) -> Path:
     Requires ISO_scores_database/ISO_scores_denovo (from the IForest stage) already
     present in grove_forest_dir/results/*.parquet.
     """
-    from ..plotting.plotting import plot_ks_vs_tp  # local import: plotting.py imports this module at load time
+    from ..plotting.plotting import plot_ks_vs_tp
 
     results_dir = grove_forest_dir / "results"
     files = sorted(results_dir.glob("*.parquet"))

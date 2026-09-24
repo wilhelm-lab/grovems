@@ -38,24 +38,13 @@ overrides applied) is written to `<outdir>/config.yaml` -- a permanent, self-con
 record of exactly what produced that run's output, independent of whatever `--set` flags
 were used to launch it.
 
-On a SLURM cluster, submit [`tutorials/run_pipeline.slurm`](tutorials/run_pipeline.slurm)
-with `sbatch` (edit its `DATABASE_SEARCH_PATH`/`DENOVO_SEARCH_PATH`/`RAWDATA_PATH` first);
-use [`tutorials/run_pipeline_denovo_only.slurm`](tutorials/run_pipeline_denovo_only.slurm)
-if there's no database search to compare against, and
-[`tutorials/resubmit_pipeline.slurm`](tutorials/resubmit_pipeline.slurm) to rerun an
-existing output directory unchanged (e.g. after a transient failure). Full usage
-(standalone IForest runs, one-file local test) is in
-[`docs/notes/quickstart.rst`](docs/notes/quickstart.rst); one-time setup is in
-[`docs/notes/installation.rst`](docs/notes/installation.rst).
+one-time setup is in [`docs/notes/installation.rst`](docs/notes/installation.rst).
 
 ## Cluster portability
 
 - **Percolator**: provided externally, not a `pyproject.toml` dependency. Point
   `percolator_exe: /path/to/percolator` at a specific local install (default: bare
-  `percolator`, resolved via `PATH`), or set `percolator_module: percolator/3.7.1` for
-  sites that provide it as an environment module instead (loaded via `module load`
-  before `percolator_exe` runs -- requires the invoking shell to have Lmod's init
-  sourced).
+  `percolator`, resolved via `PATH`).
 - **ThermoRawFileParser**: `thermo_exe: /path/to/ThermoRawFileParser.exe` points
   Oktoberfest at a local install (only relevant if it has to convert raw -> mzML itself;
   left unset, it falls back to its own per-platform default path).
@@ -77,6 +66,6 @@ defaults, and comments. Notable ones:
 | `thermo_exe`                                                    | `null`                                                                                      | path to a local `ThermoRawFileParser.exe`; leave unset to use Oktoberfest's own default                                                                                                                                        |
 | `num_threads` / `psa_max_workers` / `percolator_threads`        | `null` (-> `os.cpu_count()`) / `null` (-> `os.cpu_count()`) / `3`                           | worker/thread counts per stage; match these to your `#SBATCH --cpus-per-task` on a cluster                                                                                                                                     |
 | `psa_max_raw_files`                                             | `null`                                                                                      | limit PSA to the first N raw files, for testing                                                                                                                                                                                |
-| `iforest_features`                                              | (see file)                                                                                  | SUOD feature columns to train/score on -- inlined here instead of a separate config file                                                                                                                                       |
+| `iforest_features`                                              | [see file](assets/default_config.yaml)                                                      | SUOD feature columns to train/score on -- inlined here instead of a separate config file                                                                                                                                       |
 | `overwrite_outputs`                                             | `false`                                                                                     | overwrite existing per-raw-file outputs (`merged/`, `grove_forest/`) instead of skipping raw files already processed                                                                                                           |
 | `grove_forest_dir`                                              | `null`                                                                                      | only used when `run_psa: false` -- external `grove_forest/` directory for a standalone IForest and/or postprocess run (postprocess additionally needs it if `run_iforest: false` too, pointing at already-IForest-scored data) |
